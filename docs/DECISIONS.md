@@ -90,3 +90,8 @@
 - 旧仓库 `D:\codex\pet` 冻结为存档（标签 `archive/hiyoripet-0.1.3`），新仓库 `D:\codex\pet-next` 承接后续开发；桌面快捷方式指向新仓库 Release。
 - MinGW 工具链继续共享 `D:\codex\pet\.mingw`（体积大不复制），Rust 目标目录共享 `D:\rust\target`；后端 PyInstaller 冻结暂用存档仓库 venv（`D:\codex\pet\backend\.venv`）对本仓库源码构建，依赖清单已固化为 `backend/requirements.txt`，后续可在新仓库自建 venv。
 - 命中区域策略：前端缓存 + 去抖提交，Rust 用 `ExtCreateRegion` 批量建区域；禁止再回到逐矩形 `CombineRgn` 或每帧 WebGL 回读。
+
+## D16 收纳箱参考项目与命中测试策略回退（2026-09-06）
+- 参考开源项目（仅借鉴思路，不复制代码）：DeskBox（WinUI3 桌面整理/盒子映射）、Dasktop（Windows 轻量整理、图标收纳进 Boxes）、DeskTidy（拖拽吸附/自动隐藏整理）、clever-dock（Windows 开源 dock 启动器）、Shimeji-ee / Shijima-Qt（桌宠拖拽/抱起等互动范式）。
+- 命中测试：`WM_NCHITTEST + HTTRANSPARENT` 实测无法跨进程穿透到桌面（仅同线程传递），故回退 `SetWindowRgn` + `ExtCreateRegion` 批量区域；缩放期间用“缓存矩形按倍率比例换算”逐帧同步区域，既消除去抖滞后造成的条带乱码，又避免每帧 WebGL 回读（缩放实测 86-100 FPS）。
+- 收纳箱 MVP 不做图标提取/云同步/搜索，后续可扩展分类自定义与拖出还原。

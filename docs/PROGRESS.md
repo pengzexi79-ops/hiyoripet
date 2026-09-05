@@ -253,3 +253,15 @@
   - `release/HiyoriPet/backend/pet-backend.exe`：`99503C12451B79F1A8A05152724CA7DC83DEDD798BE519F830EF5C9F3C6EA81D`
   - `release/HiyoriPet_0.1.4_x64-setup.exe`：`6A8B1D7B20F68DB7ACB24100D0A0017191F3BF7B7ED52DB2690B79F967B8B40F`
   - `release/HiyoriPet_0.1.4_portable.zip`：`F9FEC6CB28EFF83A36C65CA52A2DEEECFBEA270D28A8144E836C5749A005A23D`
+
+## pet-next 0.1.4 收纳箱与缩放乱码修复（2026-09-06）
+- ✅ 缩放乱码根因确认：`SetWindowRgn` 命中区域同时裁剪绘制，去抖滞后使日和(old)被旧条带裁切。修复：缩放期间缓存不透明矩形按倍率换算并逐帧同步区域；实测缩放 86-100 FPS，中途截图人物完整无条带（`_verification/zoom-mid.png`）。
+- ✅ “无法点击消失”同根因（区域与画面错位）；修复后缩放中点击有反馈、60 连点稳定、Win32 复核透明角点穿透桌面/人物区域命中（紧凑 COMPLEXREGION 101×288）。
+- ✅ 应用收纳箱 MVP：长按 650ms 打开面板；拖喂（或 `petApi box-add`）吃掉入库并播报分类；面板按 游戏/浏览器/影音图片/办公文档/工具应用/文件夹 分组，支持打开（实测拉起 notepad）与删除；后端 `/api/box` 四接口，存储 `%APPDATA%/HiyoriPet/box.json`。
+- ✅ 参考开源项目已登记 D16（DeskBox、Dasktop、DeskTidy、clever-dock、Shimeji-ee/Shijima-Qt，仅借鉴思路）。
+- ✅ 门禁：TypeScript、Vite、Python compileall、GNU cargo check、Tauri GNU Release NSIS 全通过。
+- 交付物 SHA-256：
+  - `release/HiyoriPet/HiyoriPet.exe`：`7D0DE7AE7966443ED73B957423999FCA4B453AC0053C6DF5A1EC90392DDB677E`
+  - `release/HiyoriPet/backend/pet-backend.exe`：`9F7948E63C6ACAC0333348B5521DCA8E06163C1B375D17C05B3CEADD18F4635D`
+  - `release/HiyoriPet_0.1.4_x64-setup.exe`：`567BB92EBC7C06C147A0E110FFD1E6C001D971CE8EB6A5FF18334DF59FD222BE`
+  - `release/HiyoriPet_0.1.4_portable.zip`：`6F28E22570164386EDA3812C0ECCB8CEF9602A9DCA3E544F1E53398AD2E081C5`

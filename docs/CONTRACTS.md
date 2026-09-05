@@ -215,3 +215,14 @@ interface ModelProfile {
 - WebSocket `text-input` 可带 `image`（data URL）和 `task`：`chat`、`vision`、`scene`。带图片时前端必须使用 `vision`。
 - OpenAI-compatible、Anthropic Messages、Gemini 适配器都要把图片转为各自官方请求格式；不支持图片的模型不能被路由到视觉任务。
 - 多模型协作按任务路由：只选 `enabled=true` 且声明该 task 的模型；无匹配时才回退到全部启用模型。`fallback` 按主模型/协作顺序尝试，`parallel` 并行汇总。
+
+## C8 应用收纳箱（2026-09-06）
+- 存储：`%APPDATA%/HiyoriPet/box.json`，条目 `{ id, name, path, category, added_at }`；不含密钥类敏感信息。
+- REST：
+  - `GET /api/box` → `{ items: [...] }`
+  - `POST /api/box` ← `{ path, name? }` → `{ item }`（路径不存在报 400；重复路径返回已存在条目）
+  - `DELETE /api/box/{id}` → `{ items }`
+  - `POST /api/box/launch` ← `{ id }` → `{ launched }`（原始文件不存在报 400）
+- 分类启发式：游戏 / 浏览器 / 影音图片 / 办公文档 / 工具应用 / 文件夹（按文件名关键词与扩展名）。
+- 交互：长按宠物 650ms 打开收纳箱面板；拖拽文件/快捷方式投放到日和身上触发“吃掉”入库并播报分类；面板内可打开（`os.startfile`）或删除条目。
+- 前端扩展事件：`window.petApi.dispatch({ type: 'box-add', path })` 与拖喂同链路，供脚本冒烟。

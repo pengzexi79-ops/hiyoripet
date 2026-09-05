@@ -6,6 +6,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+import box_store
 from service_context import get_service_context
 
 app = FastAPI(title="pet-backend")
@@ -44,6 +45,15 @@ class ModelInput(BaseModel):
 
 class ModelsInput(BaseModel):
     models: list[ModelInput]
+
+
+class BoxAddInput(BaseModel):
+    path: str
+    name: str = ""
+
+
+class BoxLaunchInput(BaseModel):
+    id: str
 
 
 class CollaborationInput(BaseModel):
@@ -144,6 +154,32 @@ async def get_collaboration():
 async def save_collaboration(payload: CollaborationInput):
     try:
         return get_service_context().save_collaboration(payload.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/box")
+async def get_box():
+    return {"items": box_store.list_items()}
+
+
+@app.post("/api/box")
+async def add_box_item(payload: BoxAddInput):
+    try:
+        return {"item": box_store.add_item(payload.path, payload.name)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.delete("/api/box/{item_id}")
+async def delete_box_item(item_id: str):
+    return {"items": box_store.remove_item(item_id)}
+
+
+@app.post("/api/box/launch")
+async def launch_box_item(payload: BoxLaunchInput):
+    try:
+        return box_store.launch_item(payload.id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

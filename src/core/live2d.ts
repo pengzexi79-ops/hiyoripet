@@ -47,6 +47,7 @@ export class Live2d {
   // 不透明区域提取是 WebGL 回读，代价高；短 TTL 缓存避免每次点击/缩放都回读。
   private regionCache: Array<{ x: number; y: number; width: number; height: number }> | null = null
   private regionCacheAt = 0
+  private regionCacheZoom = 1
   private paramHook: { off: (event: string, listener: () => void) => void } | null = null
   private paramListener: (() => void) | null = null
 
@@ -153,16 +154,30 @@ export class Live2d {
    */
   getOpaqueRegions(padding = 3, force = false): Array<{ x: number; y: number; width: number; height: number }> {
     if (!this.model || !this.app) return []
+    if (this.regionCache && Math.abs(this.zoomLevel - this.regionCacheZoom) > 0.0001) {
+      // 缩放是围绕画布中心的均匀变换：缓存矩形直接按倍率比例换算，避免缩放期间再做 GPU 回读。
+      const k = this.zoomLevel / this.regionCacheZoom
+      this.regionCache = this.regionCache.map((rect) => ({
+        x: rect.x * k,
+        y: rect.y * k,
+        width: rect.width * k,
+        height: rect.height * k,
+      }))
+      this.regionCacheZoom = this.zoomLevel
+      this.regionCacheAt = performance.now()
+      return this.regionCache
+    }
     if (!force && this.regionCache && performance.now() - this.regionCacheAt < 400) return this.regionCache
-    const rects = this.computeOpaqueRegions(padding)
+    const rects = this.computeOpaqueSegments(padding)
     if (rects.length) {
       this.regionCache = rects
       this.regionCacheAt = performance.now()
+      this.regionCacheZoom = this.zoomLevel
     }
     return rects.length ? rects : (this.regionCache ?? [])
   }
 
-  private computeOpaqueRegions(padding = 3): Array<{ x: number; y: number; width: number; height: number }> {
+  private computeOpaqueSegments(padding = 3): Array<{ x: number; y: number; width: number; height: number }> {
     if (!this.model || !this.app) return []
     // WebGL 的 extract 插件在部分 WebView2 驱动上会返回空像素；不能因此清除 HWND 区域，
     // 否则透明窗口会退化为整块长方形并拦截桌面。Hiyori 固定角色用紧凑分段轮廓兜底。

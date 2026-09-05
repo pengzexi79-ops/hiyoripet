@@ -7,7 +7,7 @@ import { LogicalSize, PhysicalPosition, PhysicalSize } from '@tauri-apps/api/dpi
 import { Live2d, type ModelMeta, type PetPose } from './core/live2d'
 import { PetSocket, type WsStatus } from './core/ws'
 import { Chat } from './core/chat'
-import { clearApiConfig, discoverApiModels, fetchApiStatus, fetchCollaboration, fetchModelCatalog, saveApiConfig, saveCollaboration, saveModelCatalog, testApiConnection, type ApiProtocol, type ApiStatus, type CollaborationSettings, type DiscoveredModel, type ModelCapability, type ModelProfile, type ModelTask } from './core/api'
+import { addBoxItem, clearApiConfig, discoverApiModels, fetchApiStatus, fetchBoxItems, fetchCollaboration, fetchModelCatalog, launchBoxItem, removeBoxItem, saveApiConfig, saveCollaboration, saveModelCatalog, testApiConnection, type ApiProtocol, type ApiStatus, type BoxItem, type CollaborationSettings, type DiscoveredModel, type ModelCapability, type ModelProfile, type ModelTask } from './core/api'
 
 // 模型放置于 public/models/Hiyori/（Vite 构建时拷进 dist/models/，由 Tauri 资源一并打包）。
 const MODEL_URL = '/models/Hiyori/Hiyori.model3.json'
@@ -55,6 +55,12 @@ const apiTesting = ref(false)
 const catalogSaving = ref(false)
 const providerMessage = ref('')
 const pendingImage = ref('')
+const boxVisible = ref(false)
+const boxPos = ref({ x: 0, y: 0 })
+const box = ref<HTMLElement | null>(null)
+const boxItems = ref<BoxItem[]>([])
+const boxBusy = ref(false)
+const BOX_CATEGORIES = ['游戏', '浏览器', '影音图片', '办公文档', '工具应用', '文件夹']
 const imageInput = ref<HTMLInputElement | null>(null)
 const importInput = ref<HTMLInputElement | null>(null)
 let discoveryAddedKeys: string[] = []
@@ -103,6 +109,8 @@ let zoomBusy = false
 let nativeRegionRequest = 0
 let hideInFlight = false
 let hitRegionTimer: number | undefined
+let longPressTimer: number | undefined
+let stopDragDropListener: UnlistenFn | undefined
 
 /** 命中区域同步含 WebGL 回读与 GDI 区域提交，统一去抖，避免缩放/连点时每帧执行。 */
 function scheduleNativeHitRegion(delay = 180) {
@@ -123,11 +131,11 @@ async function syncNativeHitRegion() {
   const dpr = Math.max(1, window.devicePixelRatio || 1)
   const root = canvas.value?.parentElement
   const rootRect = root?.getBoundingClientRect()
-  const regions = pet.getOpaqueRegions(3, true)
+  const regions = pet.getOpaqueRegions(3)
   // Live2D/WebGL 某些驱动会短暂返回空像素；保留上一次有效 HWND 区域，
   // 不允许空结果退化成可拦截鼠标的整块矩形。
   if (!regions.length) return
-  const domRegions = [apiPanel.value, bubble.value].flatMap((element) => {
+  const domRegions = [apiPanel.value, bubble.value, box.value].flatMap((element) => {
     if (!element || !rootRect) return []
     const rect = element.getBoundingClientRect()
     const x = Math.max(0, rect.left - rootRect.left - 2)
@@ -213,8 +221,18 @@ onMounted(async () => {
     stopPetHiddenListener = await listen('pet-hidden', async () => {
       await closeBubble()
       closeApiPanel()
+      closeBox()
       stopAutonomy()
       stopBehavior()
+    })
+    stopDragDropListener = await appWindow.onDragDropEvent((event) => {
+      const payload = event.payload as unknown as { type?: string; paths?: string[]; position?: { x: number; y: number } }
+      if (payload.type !== 'drop' || !payload.paths?.length) return
+      const b = pet?.getBounds()
+      const pos = payload.position
+      const overPet = !pos || !b || (pos.x >= b.x - 24 && pos.x <= b.x + b.width + 24 && pos.y >= b.y - 24 && pos.y <= b.y + b.height + 24)
+      if (!overPet) return
+      void eatPath(payload.paths[0])
     })
   }
   // M3：建立后端对话通道
@@ -236,6 +254,7 @@ function onKey(e: KeyboardEvent) {
   if (e.key === 'Escape') {
     void closeBubble()
     closeApiPanel()
+    closeBox()
   }
 }
 
@@ -262,6 +281,10 @@ onBeforeUnmount(() => {
   stopPetHiddenListener = undefined
   stopWindowMovedListener?.()
   stopWindowMovedListener = undefined
+  stopDragDropListener?.()
+  stopDragDropListener = undefined
+  if (longPressTimer !== undefined) clearTimeout(longPressTimer)
+  longPressTimer = undefined
   window.removeEventListener('resize', positionBubble)
   window.removeEventListener('resize', positionApiPanel)
   window.removeEventListener('resize', onNativeRegionResize)
@@ -337,7 +360,7 @@ function startAutonomy() {
 }
 
 function maybeAutonomousTalk(reason: string) {
-  if (!pet || !chat || autonomyBusy || chatBubbleVisible.value || apiPanelVisible.value || Date.now() < autonomyCooldownUntil) return
+  if (!pet || !chat || autonomyBusy || chatBubbleVisible.value || apiPanelVisible.value || boxVisible.value || Date.now() < autonomyCooldownUntil) return
   if (!reason.includes('点击') && Date.now() - lastUserInteraction.value < 15000) return
   if (wsStatus.value !== 'open' && apiStatus.value.configured) return
   if (Math.random() > (reason.includes('点击') ? 0.35 : 0.22)) return
@@ -514,6 +537,82 @@ function pickImage(event: Event) {
   reader.onload = () => { pendingImage.value = String(reader.result || '') }
   reader.onerror = () => { wsError.value = '图片读取失败，请重试。' }
   reader.readAsDataURL(file)
+}
+
+function positionBoxPanel() {
+  if (!boxVisible.value) return
+  const b = pet?.getBounds() ?? { x: window.innerWidth / 2, y: window.innerHeight / 2, width: 0, height: 0 }
+  const width = box.value?.offsetWidth || Math.min(252 * uiScale.value, window.innerWidth - 16)
+  const height = box.value?.offsetHeight || Math.min(420 * uiScale.value, window.innerHeight - 16)
+  const gap = 10
+  const right = window.innerWidth - (b.x + b.width)
+  const rawX = right >= width + gap ? b.x + b.width + gap : b.x - width - gap
+  boxPos.value = {
+    x: Math.max(8, Math.min(rawX, window.innerWidth - width - 8)),
+    y: Math.max(8, Math.min(b.y + b.height * 0.06, window.innerHeight - height - 8)),
+  }
+}
+
+async function openBox() {
+  if (apiPanelVisible.value || boxVisible.value) return
+  boxVisible.value = true
+  desktopWanderTarget = null
+  stopBehavior()
+  stopAutonomy()
+  lastUserInteraction.value = Date.now()
+  await nextTick()
+  positionBoxPanel()
+  requestAnimationFrame(positionBoxPanel)
+  scheduleNativeHitRegion()
+  void refreshBox()
+}
+
+function closeBox() {
+  if (!boxVisible.value) return
+  boxVisible.value = false
+  scheduleNativeHitRegion()
+  startBehavior()
+  startAutonomy()
+}
+
+async function refreshBox() {
+  try {
+    boxItems.value = (await fetchBoxItems()).items
+  } catch {
+    // 后端启动期间允许稍后重试。
+  }
+}
+
+async function eatPath(path: string) {
+  try {
+    const { item } = await addBoxItem(path)
+    pet?.applyPose('happy', 2600)
+    pet?.playMotionRandom('Idle').catch(() => {})
+    showReaction(window.innerWidth / 2, window.innerHeight * 0.3)
+    showSpeech(`啊呜～把「${item.name}」吃掉啦，已放进${item.category}收纳格！`)
+    void refreshBox()
+  } catch (e) {
+    showSpeech(`这个我吃不下去：${(e as Error)?.message ?? e}`)
+  }
+}
+
+async function launchBox(item: BoxItem) {
+  boxBusy.value = true
+  try {
+    await launchBoxItem(item.id)
+  } catch (e) {
+    showSpeech(`打不开：${(e as Error)?.message ?? e}`)
+  } finally {
+    boxBusy.value = false
+  }
+}
+
+async function deleteBox(item: BoxItem) {
+  try {
+    boxItems.value = (await removeBoxItem(item.id)).items
+  } catch (e) {
+    showSpeech(`删除失败：${(e as Error)?.message ?? e}`)
+  }
 }
 
 async function testConnection() {
@@ -730,7 +829,7 @@ async function stepDesktopWander() {
 function startBehavior() {
   stopBehavior()
   behaviorTimer = window.setInterval(() => {
-    if (!pet || chatBubbleVisible.value || apiPanelVisible.value || press) return
+    if (!pet || chatBubbleVisible.value || apiPanelVisible.value || boxVisible.value || press) return
     if (Date.now() - lastUserInteraction.value < 12000) return
     if ((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) {
       void stepDesktopWander()
@@ -793,6 +892,7 @@ type PetApiAction =
   | { type: 'motion'; group: string }
   | { type: 'face'; name: PetFace }
   | { type: 'say'; text: string }
+  | { type: 'box-add'; path: string }
 
 function onApiAction(event: Event) {
   const action = (event as CustomEvent<PetApiAction>).detail
@@ -804,6 +904,7 @@ function onApiAction(event: Event) {
     subtitle.value = action.text
     openBubble()
   }
+  if (action.type === 'box-add') void eatPath(action.path)
 }
 
 function inDesktopShell() {
@@ -1073,7 +1174,7 @@ async function applyZoom(nextZoom: number) {
     pet.syncRendererSize()
     pet.setZoom(zoomLevel.value)
     if (meta.value) pet.resizeModel(meta.value)
-    scheduleNativeHitRegion(260)
+    void syncNativeHitRegion()
     if (beforePosition && beforeSize) {
       const afterSize = await appWindow.outerSize().catch(() => null)
       if (afterSize) {
@@ -1148,6 +1249,10 @@ function onContextMenu(e: MouseEvent) {
   e.preventDefault()
   e.stopPropagation()
   if (!pet) return
+  if (boxVisible.value) {
+    closeBox()
+    return
+  }
   // 透明桌宠窗口本身只承载日和；不再用 Live2D 包围盒拦截右键，避免 DPI/缩放后点到身体边缘无响应。
   guideVisible.value = false
   desktopWanderTarget = null
@@ -1164,6 +1269,13 @@ function onPointerDown(e: PointerEvent) {
   guideVisible.value = false
   canvas.value?.setPointerCapture(e.pointerId)
   press = { pointerId: e.pointerId, clientX: e.clientX, clientY: e.clientY, x: e.offsetX, y: e.offsetY }
+  if (longPressTimer !== undefined) clearTimeout(longPressTimer)
+  longPressTimer = window.setTimeout(() => {
+    longPressTimer = undefined
+    press = null
+    if (canvas.value?.hasPointerCapture(e.pointerId)) canvas.value.releasePointerCapture(e.pointerId)
+    openBox()
+  }, 650)
   pet.focus(e.offsetX, e.offsetY)
 }
 
@@ -1173,6 +1285,10 @@ function onPointerMove(e: PointerEvent) {
   pet.focus(e.offsetX, e.offsetY)
   if (!press || press.pointerId !== e.pointerId) return
   if (Math.hypot(e.clientX - press.clientX, e.clientY - press.clientY) < 7) return
+  if (longPressTimer !== undefined) {
+    clearTimeout(longPressTimer)
+    longPressTimer = undefined
+  }
   press = null
   desktopWanderTarget = null
   lastUserInteraction.value = Date.now()
@@ -1181,6 +1297,10 @@ function onPointerMove(e: PointerEvent) {
 }
 function onPointerUp(e: PointerEvent) {
   if (canvas.value?.hasPointerCapture(e.pointerId)) canvas.value.releasePointerCapture(e.pointerId)
+  if (longPressTimer !== undefined) {
+    clearTimeout(longPressTimer)
+    longPressTimer = undefined
+  }
   if (!press || press.pointerId !== e.pointerId) return
   const p = press
   press = null
@@ -1188,6 +1308,10 @@ function onPointerUp(e: PointerEvent) {
 }
 function onPointerCancel(e: PointerEvent) {
   if (canvas.value?.hasPointerCapture(e.pointerId)) canvas.value.releasePointerCapture(e.pointerId)
+  if (longPressTimer !== undefined) {
+    clearTimeout(longPressTimer)
+    longPressTimer = undefined
+  }
   press = null
 }
 
@@ -1299,6 +1423,32 @@ function onWheel(e: WheelEvent) {
       </div>
       <div v-if="apiError" class="bubble-error">⚠ {{ apiError }}</div>
       <small>内置常用国内外服务；“自定义接口”可填写其他官方或中转地址。识别不会发起生成请求，测试连接可能产生一次计费请求。</small>
+    </div>
+
+    <div
+      v-if="boxVisible"
+      ref="box"
+      class="box-panel"
+      :style="{ left: boxPos.x + 'px', top: boxPos.y + 'px' }"
+      @pointerdown.stop
+      @click.stop
+      @contextmenu.prevent="closeBox"
+    >
+      <div class="panel-head">
+        <div><strong>应用收纳箱</strong><div class="panel-subtitle">长按宠物打开 · 拖文件到日和身上喂食收纳</div></div>
+        <button type="button" class="icon-button" aria-label="关闭收纳箱" @click="closeBox">×</button>
+      </div>
+      <div v-if="!boxItems.length" class="box-empty">还没有存货～把应用或文件拖到日和身上，她会吃掉并分类存好。</div>
+      <div v-for="category in BOX_CATEGORIES" :key="category" class="box-group">
+        <template v-if="boxItems.filter((entry) => entry.category === category).length">
+          <div class="catalog-title">{{ category }} · {{ boxItems.filter((entry) => entry.category === category).length }}</div>
+          <div v-for="item in boxItems.filter((entry) => entry.category === category)" :key="item.id" class="box-row">
+            <div class="model-info"><strong>{{ item.name }}</strong><small>{{ item.path }}</small></div>
+            <button type="button" class="secondary-action" :disabled="boxBusy" @click="launchBox(item)">打开</button>
+            <button type="button" class="icon-button" :aria-label="`删除 ${item.name}`" @click="deleteBox(item)">×</button>
+          </div>
+        </template>
+      </div>
     </div>
 
     <div
@@ -1461,6 +1611,13 @@ body {
 .pending-image { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
 .pending-image img { width: 44px; height: 44px; object-fit: cover; border-radius: 8px; border: 1px solid #d7e0e8; }
 .pending-image button { border: 0; background: transparent; color: #8493a3; font-size: 15px; cursor: pointer; }
+.box-panel { position: absolute; z-index: 85; width: min(calc(252px * var(--ui-scale)), calc(100vw - 16px)); max-height: min(calc(100vh - 16px), calc(420px * var(--ui-scale))); overflow: auto; box-sizing: border-box; padding: calc(12px * var(--ui-scale)); border: 1px solid rgba(91, 117, 145, 0.2); border-radius: calc(14px * var(--ui-scale)); background: rgba(255, 255, 255, 0.97); color: #2f435a; box-shadow: 0 10px 30px rgba(31, 55, 78, 0.24); }
+.box-empty { margin: 6px 0; color: #7b8a98; font-size: calc(11px * var(--ui-scale)); line-height: 1.5; }
+.box-row { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
+.box-row .model-info { min-width: 0; flex: 1; color: #40566d; }
+.box-row .model-info strong, .box-row .model-info small { display: block; overflow-wrap: anywhere; line-height: 1.25; }
+.box-row .model-info small { color: #7b8a98; font-size: calc(9px * var(--ui-scale)); }
+.box-row button.secondary-action { flex: 0 0 auto; padding: 4px 8px; font-size: calc(10px * var(--ui-scale)); background: #eef2f6; color: #637489; border: 0; border-radius: 8px; cursor: pointer; }
 .subtitle {
   position: absolute;
   left: 50%;

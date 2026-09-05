@@ -106,6 +106,30 @@ export async function saveModelCatalog(models: Array<ModelProfile & { api_key?: 
   return requestJson('/api/models', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ models }) })
 }
 
+export interface BoxItem {
+  id: string
+  name: string
+  path: string
+  category: string
+  added_at: string
+}
+
+export async function fetchBoxItems(): Promise<{ items: BoxItem[] }> {
+  return requestJson('/api/box')
+}
+
+export async function addBoxItem(path: string, name = ''): Promise<{ item: BoxItem }> {
+  return requestJson('/api/box', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, name }) })
+}
+
+export async function removeBoxItem(id: string): Promise<{ items: BoxItem[] }> {
+  return requestJson(`/api/box/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export async function launchBoxItem(id: string): Promise<{ launched: string }> {
+  return requestJson('/api/box/launch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) })
+}
+
 export async function fetchCollaboration(): Promise<CollaborationSettings> {
   return requestJson('/api/collaboration')
 }
