@@ -226,3 +226,9 @@ interface ModelProfile {
 - 分类启发式：游戏 / 浏览器 / 影音图片 / 办公文档 / 工具应用 / 文件夹（按文件名关键词与扩展名）。
 - 交互：长按宠物 650ms 打开收纳箱面板；拖拽文件/快捷方式投放到日和身上触发“吃掉”入库并播报分类；面板内可打开（`os.startfile`）或删除条目。
 - 前端扩展事件：`window.petApi.dispatch({ type: 'box-add', path })` 与拖喂同链路，供脚本冒烟。
+
+## C8 补充（2026-09-06 晚）
+- `PUT /api/box/{id}` ← `{ category }` → `{ items }`：用户自主改分类（1-12 字）。
+- `POST /api/box/export` ← `{ id }` → `{ shortcut }`：在桌面生成 `.lnk` 快捷方式（PowerShell WScript.Shell COM）。
+- `POST /api/box` 在已接入 API 时先启发式分类、再请模型复核分类（6s 超时，失败回退启发式）；响应始终为 `{ item: 单条目 }`。
+- 拖喂命中判定使用 CSS 像素（拖放坐标按 devicePixelRatio 换算），投放到收纳箱面板内同样接收入库；拖入悬停时日和给出惊讶反馈。

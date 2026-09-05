@@ -95,3 +95,8 @@
 - 参考开源项目（仅借鉴思路，不复制代码）：DeskBox（WinUI3 桌面整理/盒子映射）、Dasktop（Windows 轻量整理、图标收纳进 Boxes）、DeskTidy（拖拽吸附/自动隐藏整理）、clever-dock（Windows 开源 dock 启动器）、Shimeji-ee / Shijima-Qt（桌宠拖拽/抱起等互动范式）。
 - 命中测试：`WM_NCHITTEST + HTTRANSPARENT` 实测无法跨进程穿透到桌面（仅同线程传递），故回退 `SetWindowRgn` + `ExtCreateRegion` 批量区域；缩放期间用“缓存矩形按倍率比例换算”逐帧同步区域，既消除去抖滞后造成的条带乱码，又避免每帧 WebGL 回读（缩放实测 86-100 FPS）。
 - 收纳箱 MVP 不做图标提取/云同步/搜索，后续可扩展分类自定义与拖出还原。
+
+## D17 步态/互动与缩放区域策略 v2（2026-09-06 晚）
+- 步态参考 Shimelee-ee / Shijima-Qt 的"相位驱动"思路：行走期间由 ensureParamHook 按时间相位驱动 ParamLeg/ParamArmLA/RA/BodyAngleZ/BodyAngleY（迈步 bob），位移按 |sin(phase)| 调制减少滑步；行走方向驱动 BodyAngleX 倾斜；新增 jump 姿态（双击触发）。
+- 缩放期间命中区域提交整窗（不裁剪），静止 300ms 后恢复精确区域；区域提交做去重（相同矩形不重复 SetWindowRgn），缩放上限按当前显示器工作区动态钳制，避免窗口超出屏幕造成"放到最大消失"。
+- 收纳箱导出只做桌面快捷方式，不移动/复制原文件，避免大文件拷贝与误删。

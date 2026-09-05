@@ -25,7 +25,7 @@ export interface ModelMeta {
 
 export type PetPose =
   | 'idle' | 'walk' | 'lie' | 'kneel' | 'duck-sit'
-  | 'happy' | 'angry' | 'cute' | 'surprised' | 'sleepy'
+  | 'happy' | 'angry' | 'cute' | 'surprised' | 'sleepy' | 'jump'
 
 export class Live2d {
   private app: PIXI.Application | null = null
@@ -44,6 +44,8 @@ export class Live2d {
   private poseTimer: number | undefined
   private activePose: PetPose = 'idle'
   private poseStartedAt = 0
+  // 行走方向（-1 左 / 1 右），用于步态倾斜与摆臂相位。
+  private walkDir = 1
   // 不透明区域提取是 WebGL 回读，代价高；短 TTL 缓存避免每次点击/缩放都回读。
   private regionCache: Array<{ x: number; y: number; width: number; height: number }> | null = null
   private regionCacheAt = 0
@@ -249,6 +251,23 @@ export class Live2d {
 
   // ── M4 互动扩展：注视 / 缩放 / 伪表情 ───────────────────────
 
+  /** 行走方向（-1 左 / 1 右），驱动步态倾斜与摆臂相位。 */
+  setWalkDir(dir: number): void {
+    this.walkDir = dir >= 0 ? 1 : -1
+  }
+
+  /** 延长当前姿态时限但不重置步态相位（行走循环持续驱动用）。 */
+  extendPose(durationMs: number): void {
+    if (!this.model || this.activePose === 'idle') return
+    if (this.poseTimer) clearTimeout(this.poseTimer)
+    this.poseTimer = window.setTimeout(() => {
+      this.poseTargets = {}
+      this.activePose = 'idle'
+      this.poseStartedAt = performance.now()
+      this.poseTimer = undefined
+    }, Math.max(800, durationMs))
+  }
+
   /** 视线跟随：眼睛与头部看向 (x,y)（world space）。底层 Live2DModel.focus 内部自行做坐标转换。 */
   focus(x: number, y: number): void {
     this.model?.focus(x, y)
@@ -360,6 +379,7 @@ export class Live2d {
     neutral()
     switch (pose) {
       case 'walk': set('ParamBodyAngleX', 0.58); set('ParamBodyAngleY', 0.54); set('ParamBodyAngleZ', 0.56); set('ParamLeg', 0.38); set('ParamArmLA', 0.68); set('ParamArmRA', 0.32); break
+      // walk 的摆臂/迈腿在 ensureParamHook 里按步态相位持续驱动（参考 Shimeji-ee 步态循环思路）。
       case 'lie': set('ParamBodyAngleY', 0.2); set('ParamBodyAngleZ', 0.42); set('ParamLeg', 0.2); set('ParamArmLA', 0.42); set('ParamArmRA', 0.58); break
       case 'kneel': set('ParamBodyAngleY', 0.43); set('ParamBodyAngleZ', 0.52); set('ParamLeg', 0.28); set('ParamArmLA', 0.62); set('ParamArmRA', 0.38); break
       case 'duck-sit': set('ParamBodyAngleY', 0.34); set('ParamBodyAngleZ', 0.5); set('ParamLeg', 0.14); set('ParamArmLA', 0.55); set('ParamArmRA', 0.45); break
@@ -368,6 +388,7 @@ export class Live2d {
       case 'cute': set('ParamMouthForm', 0.78); set('ParamCheek', 0.8); set('ParamBodyAngleZ', 0.47); set('ParamEyeLSmile', 0.9); set('ParamEyeRSmile', 0.9); break
       case 'surprised': set('ParamMouthOpenY', 0.78); set('ParamEyeLOpen', 1); set('ParamEyeROpen', 1); set('ParamBrowLY', 0.86); set('ParamBrowRY', 0.86); break
       case 'sleepy': set('ParamEyeLOpen', 0.28); set('ParamEyeROpen', 0.28); set('ParamBodyAngleY', 0.46); break
+      case 'jump': set('ParamBodyAngleY', 0.72); set('ParamArmLA', 0.82); set('ParamArmRA', 0.82); set('ParamMouthOpenY', 0.5); set('ParamEyeLOpen', 1); set('ParamEyeROpen', 1); break
     }
     this.poseTimer = window.setTimeout(() => {
       this.poseTargets = {}
@@ -397,9 +418,17 @@ export class Live2d {
         const span = range.max - range.min
         let animatedTarget = target
         if (this.activePose === 'walk') {
-          if (id === 'ParamLeg') animatedTarget += span * 0.12 * wave
-          if (id === 'ParamArmLA' || id === 'ParamArmRA') animatedTarget += span * 0.08 * (id === 'ParamArmLA' ? wave : -wave)
-          if (id === 'ParamBodyAngleZ') animatedTarget += span * 0.04 * sway
+          const stepWave = Math.sin(elapsed * 9)
+          if (id === 'ParamLeg') animatedTarget += span * 0.34 * stepWave
+          if (id === 'ParamArmLA') animatedTarget += span * 0.26 * -stepWave
+          if (id === 'ParamArmRA') animatedTarget += span * 0.26 * stepWave
+          if (id === 'ParamBodyAngleZ') animatedTarget += span * 0.07 * Math.sin(elapsed * 4.5)
+          if (id === 'ParamBodyAngleY') animatedTarget += span * 0.05 * Math.abs(Math.sin(elapsed * 9))
+          if (id === 'ParamBodyAngleX') animatedTarget += span * 0.06 * this.walkDir
+        } else if (this.activePose === 'jump') {
+          const bounce = Math.sin(elapsed * 12) * Math.exp(-elapsed * 2.2)
+          if (id === 'ParamBodyAngleY') animatedTarget += span * 0.3 * bounce
+          if (id === 'ParamArmLA' || id === 'ParamArmRA') animatedTarget += span * 0.18 * bounce
         } else if (this.activePose === 'happy' || this.activePose === 'cute') {
           if (id === 'ParamBodyAngleZ') animatedTarget += span * 0.025 * sway
           if (id === 'ParamBustY' || id === 'ParamRibbon') animatedTarget += span * 0.06 * wave

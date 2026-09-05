@@ -7,7 +7,7 @@ import { LogicalSize, PhysicalPosition, PhysicalSize } from '@tauri-apps/api/dpi
 import { Live2d, type ModelMeta, type PetPose } from './core/live2d'
 import { PetSocket, type WsStatus } from './core/ws'
 import { Chat } from './core/chat'
-import { addBoxItem, clearApiConfig, discoverApiModels, fetchApiStatus, fetchBoxItems, fetchCollaboration, fetchModelCatalog, launchBoxItem, removeBoxItem, saveApiConfig, saveCollaboration, saveModelCatalog, testApiConnection, type ApiProtocol, type ApiStatus, type BoxItem, type CollaborationSettings, type DiscoveredModel, type ModelCapability, type ModelProfile, type ModelTask } from './core/api'
+import { addBoxItem, clearApiConfig, discoverApiModels, exportBoxItem, fetchApiStatus, fetchBoxItems, fetchCollaboration, fetchModelCatalog, launchBoxItem, removeBoxItem, saveApiConfig, saveCollaboration, saveModelCatalog, testApiConnection, updateBoxCategory, type ApiProtocol, type ApiStatus, type BoxItem, type CollaborationSettings, type DiscoveredModel, type ModelCapability, type ModelProfile, type ModelTask } from './core/api'
 
 // 模型放置于 public/models/Hiyori/（Vite 构建时拷进 dist/models/，由 Tauri 资源一并打包）。
 const MODEL_URL = '/models/Hiyori/Hiyori.model3.json'
@@ -61,6 +61,8 @@ const box = ref<HTMLElement | null>(null)
 const boxItems = ref<BoxItem[]>([])
 const boxBusy = ref(false)
 const BOX_CATEGORIES = ['游戏', '浏览器', '影音图片', '办公文档', '工具应用', '文件夹']
+const customCategories = computed(() => Array.from(new Set(boxItems.value.map((item) => item.category))).filter((c) => !BOX_CATEGORIES.includes(c)))
+const boxCategoryList = computed(() => [...BOX_CATEGORIES, ...customCategories.value])
 const imageInput = ref<HTMLInputElement | null>(null)
 const importInput = ref<HTMLInputElement | null>(null)
 let discoveryAddedKeys: string[] = []
@@ -111,6 +113,13 @@ let hideInFlight = false
 let hitRegionTimer: number | undefined
 let longPressTimer: number | undefined
 let stopDragDropListener: UnlistenFn | undefined
+let lastSubmittedRegion = ''
+let workAreaCache: { w: number; h: number; at: number } | null = null
+let zoomCapNow = 2.2
+let lastClickAt = 0
+let lastClickX = 0
+let lastClickY = 0
+let dragOverFeedbackAt = 0
 
 /** 命中区域同步含 WebGL 回读与 GDI 区域提交，统一去抖，避免缩放/连点时每帧执行。 */
 function scheduleNativeHitRegion(delay = 180) {
@@ -145,14 +154,37 @@ async function syncNativeHitRegion() {
     return right > x && bottom > y ? [{ x, y, width: right - x, height: bottom - y }] : []
   })
   const allRegions = [...regions, ...domRegions]
-  await invoke('set_hit_region', {
-    rects: allRegions.map((rect) => ({
-      x: Math.floor(rect.x * dpr),
-      y: Math.floor(rect.y * dpr),
-      width: Math.max(1, Math.ceil(rect.width * dpr)),
-      height: Math.max(1, Math.ceil(rect.height * dpr)),
-    })),
-  }).catch(() => {})
+  const payload = allRegions.map((rect) => ({
+    x: Math.floor(rect.x * dpr),
+    y: Math.floor(rect.y * dpr),
+    width: Math.max(1, Math.ceil(rect.width * dpr)),
+    height: Math.max(1, Math.ceil(rect.height * dpr)),
+  }))
+  const key = JSON.stringify(payload)
+  if (key === lastSubmittedRegion) return
+  lastSubmittedRegion = key
+  await invoke('set_hit_region', { rects: payload }).catch(() => {})
+}
+
+/** 缩放进行中提交整窗区域：不做任何裁剪，彻底避免区域与画面错位产生条带乱码。 */
+async function setFullWindowRegion() {
+  const dpr = Math.max(1, window.devicePixelRatio || 1)
+  const payload = [{ x: 0, y: 0, width: Math.ceil(window.innerWidth * dpr), height: Math.ceil(window.innerHeight * dpr) }]
+  const key = JSON.stringify(payload)
+  if (key === lastSubmittedRegion) return
+  lastSubmittedRegion = key
+  await invoke('set_hit_region', { rects: payload }).catch(() => {})
+}
+
+/** 缩放上限跟随当前显示器工作区，避免窗口超出屏幕导致人物"消失"。 */
+async function maxZoomLevel() {
+  const now = Date.now()
+  if (!workAreaCache || now - workAreaCache.at > 3000) {
+    const monitor = await currentMonitor().catch(() => null)
+    if (monitor) workAreaCache = { w: monitor.workArea.size.width, h: monitor.workArea.size.height, at: now }
+  }
+  if (!workAreaCache) return 2.2
+  return Math.max(0.65, Math.min(2.2, Math.floor(Math.min((workAreaCache.h - 12) / 600, (workAreaCache.w - 12) / 360) * 20) / 20))
 }
 
 function onNativeRegionResize() {
@@ -227,11 +259,23 @@ onMounted(async () => {
     })
     stopDragDropListener = await appWindow.onDragDropEvent((event) => {
       const payload = event.payload as unknown as { type?: string; paths?: string[]; position?: { x: number; y: number } }
+      const dpr = Math.max(1, window.devicePixelRatio || 1)
+      if (payload.type === 'enter' || payload.type === 'over') {
+        const nowMs = Date.now()
+        if (nowMs - dragOverFeedbackAt > 600) {
+          dragOverFeedbackAt = nowMs
+          pet?.applyPose('surprised', 900)
+          showReaction(window.innerWidth / 2, window.innerHeight * 0.25)
+        }
+        return
+      }
       if (payload.type !== 'drop' || !payload.paths?.length) return
       const b = pet?.getBounds()
-      const pos = payload.position
+      const pos = payload.position ? { x: payload.position.x / dpr, y: payload.position.y / dpr } : null
+      const boxRect = box.value?.getBoundingClientRect()
+      const overBox = !!boxRect && !!pos && pos.x >= boxRect.left && pos.x <= boxRect.right && pos.y >= boxRect.top && pos.y <= boxRect.bottom
       const overPet = !pos || !b || (pos.x >= b.x - 24 && pos.x <= b.x + b.width + 24 && pos.y >= b.y - 24 && pos.y <= b.y + b.height + 24)
-      if (!overPet) return
+      if (!overPet && !overBox) return
       void eatPath(payload.paths[0])
     })
   }
@@ -615,6 +659,28 @@ async function deleteBox(item: BoxItem) {
   }
 }
 
+async function recategorize(item: BoxItem, category: string) {
+  const next = String(category || '').trim()
+  if (!next || next === item.category) return
+  try {
+    boxItems.value = (await updateBoxCategory(item.id, next)).items
+  } catch (e) {
+    showSpeech(`改分类失败：${(e as Error)?.message ?? e}`)
+  }
+}
+
+async function exportBox(item: BoxItem) {
+  boxBusy.value = true
+  try {
+    const res = await exportBoxItem(item.id)
+    showSpeech(`已导出到桌面：${res.shortcut.split('\\').pop()}`)
+  } catch (e) {
+    showSpeech(`导出失败：${(e as Error)?.message ?? e}`)
+  } finally {
+    boxBusy.value = false
+  }
+}
+
 async function testConnection() {
   apiTesting.value = true
   apiError.value = ''
@@ -803,12 +869,16 @@ async function stepDesktopWander() {
     }
     if (!desktopWalking) {
       desktopWalking = true
-      pet.applyPose('walk', 2400)
+      pet.applyPose('walk', 1600)
     }
+    pet.setWalkDir(dx)
+    pet.extendPose(1600)
     const now = performance.now()
     const elapsed = desktopStepAt > 0 ? Math.min(120, now - desktopStepAt) : 33
     desktopStepAt = now
-    const step = Math.min(distance, Math.max(1, elapsed * 0.12))
+    // 步态相位调制位移：落脚阶段慢、迈腿阶段快，减少"平移滑动感"。
+    const gait = 0.45 + 0.55 * Math.abs(Math.sin(now / 110))
+    const step = Math.min(distance, Math.max(1, elapsed * 0.12) * gait)
     const monitor = await currentMonitor()
     const size = await appWindow.outerSize()
     if (!monitor) return
@@ -893,6 +963,7 @@ type PetApiAction =
   | { type: 'face'; name: PetFace }
   | { type: 'say'; text: string }
   | { type: 'box-add'; path: string }
+  | { type: 'wander' }
 
 function onApiAction(event: Event) {
   const action = (event as CustomEvent<PetApiAction>).detail
@@ -905,6 +976,11 @@ function onApiAction(event: Event) {
     openBubble()
   }
   if (action.type === 'box-add') void eatPath(action.path)
+  if (action.type === 'wander') {
+    nextWanderAt = 0
+    desktopWanderTarget = null
+    void stepDesktopWander()
+  }
 }
 
 function inDesktopShell() {
@@ -1160,7 +1236,8 @@ async function closePet() {
 
 async function applyZoom(nextZoom: number) {
   if (!pet) return
-  zoomLevel.value = Math.max(0.65, Math.min(2.2, nextZoom))
+  zoomCapNow = await maxZoomLevel()
+  zoomLevel.value = Math.max(0.65, Math.min(zoomCapNow, nextZoom))
   const targetWidth = Math.round(360 * zoomLevel.value)
   const targetHeight = Math.round(600 * zoomLevel.value)
   if ((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) {
@@ -1174,7 +1251,8 @@ async function applyZoom(nextZoom: number) {
     pet.syncRendererSize()
     pet.setZoom(zoomLevel.value)
     if (meta.value) pet.resizeModel(meta.value)
-    void syncNativeHitRegion()
+    void setFullWindowRegion()
+    scheduleNativeHitRegion(300)
     if (beforePosition && beforeSize) {
       const afterSize = await appWindow.outerSize().catch(() => null)
       if (afterSize) {
@@ -1217,7 +1295,7 @@ function scheduleZoomFlush() {
   })
 }
 function queueZoom(nextZoom: number) {
-  pendingZoom = Math.max(0.65, Math.min(2.2, nextZoom))
+  pendingZoom = Math.max(0.65, Math.min(zoomCapNow, nextZoom))
   zoomLevel.value = pendingZoom
   scheduleZoomFlush()
 }
@@ -1304,7 +1382,20 @@ function onPointerUp(e: PointerEvent) {
   if (!press || press.pointerId !== e.pointerId) return
   const p = press
   press = null
-  if (Math.hypot(e.clientX - p.clientX, e.clientY - p.clientY) < 7) interactAt(p.x, p.y)
+  if (Math.hypot(e.clientX - p.clientX, e.clientY - p.clientY) < 7) {
+    const nowMs = Date.now()
+    const isDouble = nowMs - lastClickAt < 350 && Math.hypot(e.clientX - lastClickX, e.clientY - lastClickY) < 24
+    lastClickAt = nowMs
+    lastClickX = e.clientX
+    lastClickY = e.clientY
+    if (isDouble) {
+      pet?.applyPose('jump', 900)
+      showReaction(p.x, Math.max(20, p.y - 30))
+      lastClickAt = 0
+      return
+    }
+    interactAt(p.x, p.y)
+  }
 }
 function onPointerCancel(e: PointerEvent) {
   if (canvas.value?.hasPointerCapture(e.pointerId)) canvas.value.releasePointerCapture(e.pointerId)
@@ -1439,16 +1530,21 @@ function onWheel(e: WheelEvent) {
         <button type="button" class="icon-button" aria-label="关闭收纳箱" @click="closeBox">×</button>
       </div>
       <div v-if="!boxItems.length" class="box-empty">还没有存货～把应用或文件拖到日和身上，她会吃掉并分类存好。</div>
-      <div v-for="category in BOX_CATEGORIES" :key="category" class="box-group">
+      <div v-for="category in boxCategoryList" :key="category" class="box-group">
         <template v-if="boxItems.filter((entry) => entry.category === category).length">
           <div class="catalog-title">{{ category }} · {{ boxItems.filter((entry) => entry.category === category).length }}</div>
           <div v-for="item in boxItems.filter((entry) => entry.category === category)" :key="item.id" class="box-row">
             <div class="model-info"><strong>{{ item.name }}</strong><small>{{ item.path }}</small></div>
+            <input class="category-input" :value="item.category" list="box-categories" :aria-label="`修改 ${item.name} 的分类`" @change="recategorize(item, $event.target.value)" />
             <button type="button" class="secondary-action" :disabled="boxBusy" @click="launchBox(item)">打开</button>
+            <button type="button" class="secondary-action" :disabled="boxBusy" @click="exportBox(item)">导出</button>
             <button type="button" class="icon-button" :aria-label="`删除 ${item.name}`" @click="deleteBox(item)">×</button>
           </div>
         </template>
       </div>
+      <datalist id="box-categories">
+        <option v-for="category in boxCategoryList" :key="`cat-${category}`" :value="category"></option>
+      </datalist>
     </div>
 
     <div
@@ -1618,6 +1714,7 @@ body {
 .box-row .model-info strong, .box-row .model-info small { display: block; overflow-wrap: anywhere; line-height: 1.25; }
 .box-row .model-info small { color: #7b8a98; font-size: calc(9px * var(--ui-scale)); }
 .box-row button.secondary-action { flex: 0 0 auto; padding: 4px 8px; font-size: calc(10px * var(--ui-scale)); background: #eef2f6; color: #637489; border: 0; border-radius: 8px; cursor: pointer; }
+.category-input { flex: 0 0 auto; width: 62px; min-width: 0; padding: 3px 4px; border: 1px solid #d7e0e8; border-radius: 6px; font-size: calc(10px * var(--ui-scale)); color: #40566d; background: white; outline: none; }
 .subtitle {
   position: absolute;
   left: 50%;

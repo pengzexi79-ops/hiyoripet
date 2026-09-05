@@ -91,6 +91,40 @@ def remove_item(item_id: str) -> list[dict[str, Any]]:
         return items
 
 
+def set_category(item_id: str, category: str) -> list[dict[str, Any]]:
+    category = category.strip()
+    if not category or len(category) > 12:
+        raise ValueError("分类名称需为 1-12 个字符")
+    with _LOCK:
+        items = _read()
+        for item in items:
+            if item.get("id") == item_id:
+                item["category"] = category
+        _write(items)
+        return items
+
+
+def export_shortcut(item_id: str) -> dict[str, Any]:
+    import subprocess
+
+    items = {item.get("id"): item for item in list_items()}
+    item = items.get(item_id)
+    if not item:
+        raise ValueError("收纳箱中找不到该条目")
+    target = Path(str(item.get("path", "")))
+    if not target.exists():
+        raise ValueError("原始文件已不存在")
+    desktop = Path.home() / "Desktop"
+    lnk = desktop / f"{item.get('name') or target.name}.lnk"
+    script = (
+        "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('" + str(lnk) + "'); "
+        "$s.TargetPath='" + str(target) + "'; "
+        "$s.WorkingDirectory='" + str(target.parent) + "'; $s.Save()"
+    )
+    subprocess.run(["powershell", "-NoProfile", "-Command", script], check=True, timeout=20, creationflags=0x08000000)
+    return {"shortcut": str(lnk)}
+
+
 def launch_item(item_id: str) -> dict[str, Any]:
     items = {item.get("id"): item for item in list_items()}
     item = items.get(item_id)

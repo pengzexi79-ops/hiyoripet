@@ -119,7 +119,8 @@ export async function fetchBoxItems(): Promise<{ items: BoxItem[] }> {
 }
 
 export async function addBoxItem(path: string, name = ''): Promise<{ item: BoxItem }> {
-  return requestJson('/api/box', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, name }) })
+  const body = await requestJson<{ item: BoxItem | BoxItem[] }>('/api/box', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ path, name }) })
+  return { item: Array.isArray(body.item) ? body.item[0] : body.item }
 }
 
 export async function removeBoxItem(id: string): Promise<{ items: BoxItem[] }> {
@@ -128,6 +129,14 @@ export async function removeBoxItem(id: string): Promise<{ items: BoxItem[] }> {
 
 export async function launchBoxItem(id: string): Promise<{ launched: string }> {
   return requestJson('/api/box/launch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) })
+}
+
+export async function updateBoxCategory(id: string, category: string): Promise<{ items: BoxItem[] }> {
+  return requestJson(`/api/box/${encodeURIComponent(id)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ category }) })
+}
+
+export async function exportBoxItem(id: string): Promise<{ shortcut: string }> {
+  return requestJson('/api/box/export', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id }) })
 }
 
 export async function fetchCollaboration(): Promise<CollaborationSettings> {

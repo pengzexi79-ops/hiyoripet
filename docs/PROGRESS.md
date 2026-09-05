@@ -265,3 +265,10 @@
   - `release/HiyoriPet/backend/pet-backend.exe`：`9F7948E63C6ACAC0333348B5521DCA8E06163C1B375D17C05B3CEADD18F4635D`
   - `release/HiyoriPet_0.1.4_x64-setup.exe`：`567BB92EBC7C06C147A0E110FFD1E6C001D971CE8EB6A5FF18334DF59FD222BE`
   - `release/HiyoriPet_0.1.4_portable.zip`：`6F28E22570164386EDA3812C0ECCB8CEF9602A9DCA3E544F1E53398AD2E081C5`
+
+## 0.1.4 第二轮：公开仓库 / 缩放上限 / 收纳箱增强 / 步态（2026-09-06 晚）
+- ✅ GitHub 仓库已公开：`pengzexi79-ops/hiyoripet-archive`（存档）与 `pengzexi79-ops/hiyoripet`（开发）。
+- ✅ 缩放：上限按工作区动态钳制（本机 2.2x 实测 792×1320 完整显示）；缩放中提交整窗区域、静止后恢复精确区域并去重，消除条带乱码与卡顿来源。
+- ✅ 收纳箱：左键长按 650ms 打开；拖喂坐标按 dpr 换算修复"拖入失败"（用户真机已入库 5 个快捷方式）；AI 复核分类（已接 API 时）+ 用户自主改分类（PUT）+ 导出桌面快捷方式（实测生成 notepad.exe.lnk）+ 修复 AI 分类路径把 item 覆盖成列表导致播报 undefined 的 bug。
+- ✅ 步态：行走相位驱动摆臂/迈腿/身体 bob 与方向倾斜，位移按步态调制；双击触发 jump；实测窗口位移 58px 且两帧步态可见差异（walk-a/b.png）。
+- ✅ 门禁与 Release：tsc / vite / compileall / cargo check / Tauri GNU NSIS 全通过；测试数据已清理，用户收纳数据保留。

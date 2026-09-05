@@ -1,4 +1,5 @@
 # FastAPI + WebSocket conversation service (contracts C2/C6).
+import asyncio
 import json
 from datetime import datetime
 
@@ -54,6 +55,10 @@ class BoxAddInput(BaseModel):
 
 class BoxLaunchInput(BaseModel):
     id: str
+
+
+class BoxCategoryInput(BaseModel):
+    category: str
 
 
 class CollaborationInput(BaseModel):
@@ -166,7 +171,44 @@ async def get_box():
 @app.post("/api/box")
 async def add_box_item(payload: BoxAddInput):
     try:
-        return {"item": box_store.add_item(payload.path, payload.name)}
+        item = box_store.add_item(payload.path, payload.name)
+        sc = get_service_context()
+        if sc.api_status().get("configured"):
+            async def _classify() -> str:
+                prompt = (
+                    "请把下面这个应用/文件归入一个简洁的中文分类（不超过6字，例如：游戏/办公文档/影音图片/工具应用/学习资料），"
+                    f"只回复分类名本身。名称={item['name']} 路径={item['path']} 参考分类={item['category']}"
+                )
+                acc = ""
+                async for piece in sc.chat_iter([{"role": "user", "content": prompt}], "scene"):
+                    acc += piece
+                return acc.strip()
+
+            try:
+                answer = await asyncio.wait_for(_classify(), 6)
+                cat = answer.splitlines()[0].strip() if answer else ""
+                if 0 < len(cat) <= 8:
+                    updated = box_store.set_category(item["id"], cat)
+                    item = next((entry for entry in updated if entry.get("id") == item["id"]), item)
+            except Exception:
+                pass
+        return {"item": item}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.put("/api/box/{item_id}")
+async def update_box_category(item_id: str, payload: BoxCategoryInput):
+    try:
+        return {"items": box_store.set_category(item_id, payload.category)}
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/box/export")
+async def export_box_item(payload: BoxLaunchInput):
+    try:
+        return box_store.export_shortcut(payload.id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
