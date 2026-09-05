@@ -1,0 +1,19 @@
+/* 透明窗口的关键：html/body 自身不能有背景色，否则透明失效 */
+html,
+body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  height: 100%;
+  background: transparent;
+  overflow: hidden;
+  /* 桌宠不该出现文本选择光标 */
+  user-select: none;
+  cursor: default;
+}
+
+#app {
+  width: 100%;
+  height: 100%;
+  background: transparent;
+}

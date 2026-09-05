@@ -1,0 +1,4 @@
+# pnpm 11 构建脚本审批配置（由 `pnpm approve-builds` 脚手架生成，此处填实值）。
+# esbuild 的 postinstall 需运行以校验/链接平台二进制；不批准则 pnpm 依赖完整性检查会失败。
+allowBuilds:
+  esbuild: true

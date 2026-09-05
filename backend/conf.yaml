@@ -1,0 +1,32 @@
+# backend/conf.yaml — 唯一配置入口（${ENV_VAR} 环境变量替换，密钥不入库）
+server:
+  host: "127.0.0.1"
+  port: 8000
+
+# LLM：默认 foxtoken 网关（OpenAI 兼容）。密钥走环境变量，不写进仓库。
+llm_configs:
+  foxtoken:
+    provider: "openai-compatible"
+    base_url: "https://foxtoken.top/v1"
+    api_key: "${FOXTOKEN_KEY}"
+    model: "gpt-5.5"
+default_llm: foxtoken
+
+# TTS：默认 Edge TTS（本地/免费，中文音色）。
+tts_configs:
+  edge:
+    provider: "edge-tts"
+    voice: "zh-CN-XiaoxiaoNeural"
+    rate: "+0%"
+default_tts: edge
+
+# ASR：M3 后续本地化（sherpa-onnx）。当前为 stub，仅文本通道可用。
+asr_configs:
+  stub:
+    provider: "stub"
+default_asr: stub
+
+# Agent：人格与对话约束
+agent:
+  system_prompt: "你是桌面上的一只高互动陪伴桌宠，性格活泼、话少而精。用简体中文，每次回复不超过 60 字。"
+  tts: false   # M3 后续：true 时每次回复后用 TTS 合成语音（需联网/音频设备）

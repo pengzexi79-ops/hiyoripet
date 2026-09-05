@@ -1,0 +1,11 @@
+# Rust 编译走 MinGW-w64 (winlibs UCRT64)，因为本机无法装 MSVC（沙箱禁提权）。
+# 详见 docs/DECISIONS.md D6。
+[target.x86_64-pc-windows-gnu]
+linker = "D:/codex/pet/.mingw/bin/x86_64-w64-mingw32-gcc.exe"
+ar = "D:/codex/pet/.mingw/bin/x86_64-w64-mingw32-ar.exe"
+# MinGW `ld` 默认导出所有静态库符号，Rust cdylib 符号量会超过 PE 导出表 16 位序数上限
+# (error: export ordinal too large)。--exclude-libs=ALL 只保留 crate 自身显式导出的符号。
+rustflags = ["-C", "link-arg=-Wl,--exclude-libs=ALL"]
+
+[build]
+target = "x86_64-pc-windows-gnu"
