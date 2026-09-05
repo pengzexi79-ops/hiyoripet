@@ -102,6 +102,16 @@ let pendingZoom: number | null = null
 let zoomBusy = false
 let nativeRegionRequest = 0
 let hideInFlight = false
+let hitRegionTimer: number | undefined
+
+/** 命中区域同步含 WebGL 回读与 GDI 区域提交，统一去抖，避免缩放/连点时每帧执行。 */
+function scheduleNativeHitRegion(delay = 180) {
+  if (hitRegionTimer !== undefined) clearTimeout(hitRegionTimer)
+  hitRegionTimer = window.setTimeout(() => {
+    hitRegionTimer = undefined
+    void syncNativeHitRegion()
+  }, delay)
+}
 
 async function syncNativeHitRegion() {
   if (!pet) return
@@ -113,7 +123,7 @@ async function syncNativeHitRegion() {
   const dpr = Math.max(1, window.devicePixelRatio || 1)
   const root = canvas.value?.parentElement
   const rootRect = root?.getBoundingClientRect()
-  const regions = pet.getOpaqueRegions()
+  const regions = pet.getOpaqueRegions(3, true)
   // Live2D/WebGL 某些驱动会短暂返回空像素；保留上一次有效 HWND 区域，
   // 不允许空结果退化成可拦截鼠标的整块矩形。
   if (!regions.length) return
@@ -138,7 +148,7 @@ async function syncNativeHitRegion() {
 }
 
 function onNativeRegionResize() {
-  void syncNativeHitRegion()
+  scheduleNativeHitRegion(240)
 }
 
 async function loadModel() {
@@ -151,7 +161,7 @@ async function loadModel() {
     nextWanderAt = Date.now() + 12000
     status.value = `已加载：${Object.keys(m.motions).length} 组动作 / ${m.expressions.length} 个表情`
     await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
-    void syncNativeHitRegion()
+    scheduleNativeHitRegion()
   } catch (e) {
     status.value = `模型加载失败：${(e as Error)?.message ?? e}（请确认 public/models/Hiyori 已放入资产）`
   }
@@ -198,7 +208,7 @@ onMounted(async () => {
       startIdle()
       startBehavior()
       startAutonomy()
-      void syncNativeHitRegion()
+      scheduleNativeHitRegion()
     })
     stopPetHiddenListener = await listen('pet-hidden', async () => {
       await closeBubble()
@@ -920,7 +930,7 @@ async function reconcileBubbleWindow() {
       }
     } finally {
       bubbleWindowBusy = false
-      void syncNativeHitRegion()
+      scheduleNativeHitRegion()
       if ((bubbleWindowDesired && !bubbleWindowLayout) || (!bubbleWindowDesired && bubbleWindowLayout)) void reconcileBubbleWindow()
     }
   })()
@@ -941,7 +951,7 @@ async function prepareBubble() {
   if (!chatBubbleVisible.value) return
   positionBubble()
   bubbleReady.value = true
-  void syncNativeHitRegion()
+  scheduleNativeHitRegion()
 }
 
 function positionBubble() {
@@ -1011,6 +1021,7 @@ async function closeBubble() {
   cancelBubbleDismiss()
   bubbleFading.value = false
   bubbleReady.value = false
+  if (!chatBubbleVisible.value && !bubbleWindowLayout) return
   chatBubbleVisible.value = false
   await requestBubbleWindowState(false)
 }
@@ -1062,7 +1073,7 @@ async function applyZoom(nextZoom: number) {
     pet.syncRendererSize()
     pet.setZoom(zoomLevel.value)
     if (meta.value) pet.resizeModel(meta.value)
-    void syncNativeHitRegion()
+    scheduleNativeHitRegion(260)
     if (beforePosition && beforeSize) {
       const afterSize = await appWindow.outerSize().catch(() => null)
       if (afterSize) {
@@ -1110,8 +1121,12 @@ function queueZoom(nextZoom: number) {
   scheduleZoomFlush()
 }
 
+let lastInteractAt = 0
 function interactAt(x: number, y: number) {
   if (!pet) return
+  const now = Date.now()
+  if (now - lastInteractAt < 120) return
+  lastInteractAt = now
   const hits = pet.hitTest(x, y)
   if (!hits.length && !pet.containsPoint(x, y)) return
   pet.focus(x, y)
@@ -1371,6 +1386,8 @@ body {
 .icon-button { border: 0; background: transparent; color: #8493a3; font-size: 20px; cursor: pointer; }
 .api-panel label { display: block; margin: calc(8px * var(--ui-scale)) 0; color: #637489; font-size: calc(11px * var(--ui-scale)); }
 .api-panel input, .api-panel select { width: 100%; box-sizing: border-box; margin-top: 4px; padding: calc(7px * var(--ui-scale)) calc(8px * var(--ui-scale)); border: 1px solid #d7e0e8; border-radius: calc(8px * var(--ui-scale)); outline: none; color: #2f435a; background: white; }
+.api-panel input[type="checkbox"] { width: auto; min-width: 13px; padding: 0; margin: 3px 0 0; border: 1px solid #d7e0e8; border-radius: 3px; }
+.model-catalog, .discovery-result { max-height: min(calc(46vh), calc(320px * var(--ui-scale))); overflow-y: auto; }
 .api-actions { display: flex; flex-wrap: wrap; gap: calc(8px * var(--ui-scale)); margin-top: calc(10px * var(--ui-scale)); }
 .api-actions button { flex: 1 1 110px; min-width: 0; border: 0; border-radius: calc(9px * var(--ui-scale)); padding: calc(7px * var(--ui-scale)) calc(8px * var(--ui-scale)); cursor: pointer; }
 .primary-action { background: #6f9bc5; color: white; }

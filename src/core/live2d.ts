@@ -44,6 +44,9 @@ export class Live2d {
   private poseTimer: number | undefined
   private activePose: PetPose = 'idle'
   private poseStartedAt = 0
+  // 不透明区域提取是 WebGL 回读，代价高；短 TTL 缓存避免每次点击/缩放都回读。
+  private regionCache: Array<{ x: number; y: number; width: number; height: number }> | null = null
+  private regionCacheAt = 0
   private paramHook: { off: (event: string, listener: () => void) => void } | null = null
   private paramListener: (() => void) | null = null
 
@@ -139,7 +142,7 @@ export class Live2d {
    */
   containsPoint(x: number, y: number): boolean {
     if (!this.model) return false
-    return this.getOpaqueRegions(0).some((rect) =>
+    return this.getOpaqueRegions().some((rect) =>
       x >= rect.x && x <= rect.x + rect.width && y >= rect.y && y <= rect.y + rect.height,
     )
   }
@@ -148,7 +151,18 @@ export class Live2d {
    * 将模型渲染成低复杂度 alpha 区域，供 Windows 原生 HWND 命中区域使用。
    * 返回 canvas CSS 像素坐标；透明的模型包围盒不会拦截桌面鼠标。
    */
-  getOpaqueRegions(padding = 3): Array<{ x: number; y: number; width: number; height: number }> {
+  getOpaqueRegions(padding = 3, force = false): Array<{ x: number; y: number; width: number; height: number }> {
+    if (!this.model || !this.app) return []
+    if (!force && this.regionCache && performance.now() - this.regionCacheAt < 400) return this.regionCache
+    const rects = this.computeOpaqueRegions(padding)
+    if (rects.length) {
+      this.regionCache = rects
+      this.regionCacheAt = performance.now()
+    }
+    return rects.length ? rects : (this.regionCache ?? [])
+  }
+
+  private computeOpaqueRegions(padding = 3): Array<{ x: number; y: number; width: number; height: number }> {
     if (!this.model || !this.app) return []
     // WebGL 的 extract 插件在部分 WebView2 驱动上会返回空像素；不能因此清除 HWND 区域，
     // 否则透明窗口会退化为整块长方形并拦截桌面。Hiyori 固定角色用紧凑分段轮廓兜底。
@@ -178,11 +192,11 @@ export class Live2d {
       if (!pixels?.length) return fallback()
       const pixelHeight = Math.max(1, Math.floor(pixels.length / 4 / pixelWidth))
       const regions: Array<{ x: number; y: number; width: number; height: number }> = []
-      for (let py = 0; py < pixelHeight; py += 4) {
-        const yEnd = Math.min(pixelHeight, py + 4)
+      for (let py = 0; py < pixelHeight; py += 6) {
+        const yEnd = Math.min(pixelHeight, py + 6)
         let runStart = -1
-        for (let px = 0; px <= pixelWidth; px += 2) {
-          const xEnd = Math.min(pixelWidth, px + 2)
+        for (let px = 0; px <= pixelWidth; px += 4) {
+          const xEnd = Math.min(pixelWidth, px + 4)
           let opaque = false
           for (let yy = py; yy < yEnd && !opaque; yy += 1) {
             for (let xx = px; xx < xEnd; xx += 1) {
@@ -192,7 +206,7 @@ export class Live2d {
               }
             }
           }
-          const isLast = px + 2 >= pixelWidth
+          const isLast = px + 4 >= pixelWidth
           if (opaque && runStart < 0) runStart = px
           if ((!opaque || isLast) && runStart >= 0) {
             const end = opaque && isLast ? pixelWidth : px
@@ -205,7 +219,7 @@ export class Live2d {
           }
         }
       }
-      return regions.length ? regions.slice(0, 700) : fallback()
+      return regions.length ? regions.slice(0, 240) : fallback()
     } catch {
       // A transient Live2D layout mutation should preserve the previous native
       // region in App.vue rather than turning the transparent window rectangular.

@@ -240,3 +240,16 @@
   - `release/HiyoriPet/backend/pet-backend.exe`：`C372B18BB6E8C143A6598EF12D87F995E921FD4366EE95BDC1F6E31CEDE89A9C`
   - `release/HiyoriPet_0.1.3_x64-setup.exe`：`B160D2F080B4FA39EBF0D5E897F0E4ED5722C15BDB2012BC180C9E92BEEED7DA`
   - `release/HiyoriPet_0.1.3_portable.zip`：`C00B8C872DC88077A92410558CB1978994769A4ADAD5B26C5DFB9FDD6178D80C`
+
+## pet-next 0.1.4（新仓库首版，2026-09-06）
+- ✅ 旧仓库 `D:\codex\pet` 已打存档标签 `archive/hiyoripet-0.1.3`；本仓库 `D:\codex\pet-next` 由其快照新建（初始提交 `98d4bb6`），后续开发均在本仓库进行。
+- ✅ 修复缩放卡死/低帧率：不透明区域 WebGL 回读改为 400ms TTL 缓存 + 采样降频 + 区域上限 240；命中区域同步统一去抖（缩放期间 260ms），不再每帧回读与提交 GDI 区域。实测缩放过程约 100 FPS，放大到 2.2x 再缩回 0.65x 全程无卡死。
+- ✅ 修复连点卡退：Rust 侧 `set_hit_region` 由逐矩形 `CombineRgn`（O(n²) GDI）改为 `ExtCreateRegion` 一次性批量建区域；前端互动增加 120ms 节流。实测连续 60 次点击窗口保持可见、进程不退出、点击反馈正常。
+- ✅ 修复 API 面板无限滚动/大片空白：根因是 `.api-panel input { width:100% }` 泄漏到行内复选框导致行宽塌缩、文字逐字换行；已为复选框恢复 `width:auto`，并给模型目录/识别结果加内部限高滚动。实测面板 `scrollWidth == clientWidth`（无横向溢出），目录内部滚动，无空白死区。
+- ✅ Win32 复核：透明角点穿透桌面、日和不透明区域命中、命中区域为紧凑复杂区域（COMPLEXREGION）。
+- ✅ 门禁：TypeScript、Vite、Python compileall、GNU cargo check、Tauri GNU Release NSIS 全部通过；桌面快捷方式已改指向本仓库 Release。
+- 交付物 SHA-256：
+  - `release/HiyoriPet/HiyoriPet.exe`：`2A9C205DEB6DBCFE919F34E19D16D9D4A2F3F3A1CA3ADD2B96E48583E4C0EB8E`
+  - `release/HiyoriPet/backend/pet-backend.exe`：`99503C12451B79F1A8A05152724CA7DC83DEDD798BE519F830EF5C9F3C6EA81D`
+  - `release/HiyoriPet_0.1.4_x64-setup.exe`：`6A8B1D7B20F68DB7ACB24100D0A0017191F3BF7B7ED52DB2690B79F967B8B40F`
+  - `release/HiyoriPet_0.1.4_portable.zip`：`F9FEC6CB28EFF83A36C65CA52A2DEEECFBEA270D28A8144E836C5749A005A23D`

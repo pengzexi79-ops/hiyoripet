@@ -85,3 +85,8 @@
 - 模型目录允许导入 JSON 配置，能力与任务路由是显式字段；未知能力按文本处理，视觉能力由用户或服务端可靠元数据确认后启用。
 - 多模态只扩展现有文本通道的 `image` data URL，不新增隐形采集；图片请求按 OpenAI-compatible、Anthropic、Gemini 各自协议转换。
 - 多模型按 `chat`、`vision`、`scene` 任务筛选，启用的模型才参与；没有匹配时安全回退到启用目录，避免桌宠因配置不完整失联。
+
+## D15 pet-next 新仓库与共享工具链（2026-09-06）
+- 旧仓库 `D:\codex\pet` 冻结为存档（标签 `archive/hiyoripet-0.1.3`），新仓库 `D:\codex\pet-next` 承接后续开发；桌面快捷方式指向新仓库 Release。
+- MinGW 工具链继续共享 `D:\codex\pet\.mingw`（体积大不复制），Rust 目标目录共享 `D:\rust\target`；后端 PyInstaller 冻结暂用存档仓库 venv（`D:\codex\pet\backend\.venv`）对本仓库源码构建，依赖清单已固化为 `backend/requirements.txt`，后续可在新仓库自建 venv。
+- 命中区域策略：前端缓存 + 去抖提交，Rust 用 `ExtCreateRegion` 批量建区域；禁止再回到逐矩形 `CombineRgn` 或每帧 WebGL 回读。
