@@ -24,7 +24,7 @@ export interface ModelMeta {
 }
 
 export type PetPose =
-  | 'idle' | 'walk' | 'lie' | 'kneel' | 'duck-sit'
+  | 'idle' | 'walk' | 'climb' | 'lie' | 'kneel' | 'duck-sit' | 'sit'
   | 'happy' | 'angry' | 'cute' | 'surprised' | 'sleepy' | 'jump'
 
 export class Live2d {
@@ -56,6 +56,10 @@ export class Live2d {
   // contain 等比缩放换算；回读损坏（部分驱动会返回局部条带）不允许污染它。
   private goodRects: Array<{ x: number; y: number; width: number; height: number }> | null = null
   private goodZoom = 1
+  // goodRects 所属画布尺寸：侧栏展开/收起会平移模型中心，区域需按中心位移换算，
+  // 否则右键长按展开收纳箱时区域仍钉在旧位置，宠物本体"画面缺失"。
+  private goodCanvasW = 0
+  private goodCanvasH = 0
   private lastReadAt = 0
   private paramHook: { off: (event: string, listener: () => void) => void } | null = null
   private paramListener: (() => void) | null = null
@@ -165,25 +169,31 @@ export class Live2d {
    */
   getOpaqueRegions(padding = 3, force = false): Array<{ x: number; y: number; width: number; height: number }> {
     if (!this.model || !this.app) return []
-    // contain 居中模型随窗口等比缩放（360x600 → 792x1320 时模型中心正好 ×k），
-    // 从原点缩放即精确；不能围绕"当前画布中心"换算——goodRects 坐标属于旧画布
-    // 坐标系，窗口尺寸变化后中心换算会把区域算到窗口外（宠物整体消失）。
+    // 区域换算 = 缩放(k) + 画布中心位移：侧栏展开会平移模型中心（resizeModel 重居中），
+    // 只按 zoom 缩放会把区域钉在旧位置 → 展开收纳箱时宠物本体"画面缺失"。
+    // 禁止围绕"当前画布中心"对旧坐标直接换算——goodRects 坐标属于 goodCanvas 坐标系。
     const scaleGood = () => {
       const k = this.zoomLevel / this.goodZoom
+      const cx = this.app!.screen.width / 2
+      const cy = this.app!.screen.height / 2
+      const gx = this.goodCanvasW / 2
+      const gy = this.goodCanvasH / 2
       return this.goodRects!.map((rect) => ({
-        x: rect.x * k,
-        y: rect.y * k,
+        x: cx + (rect.x - gx) * k,
+        y: cy + (rect.y - gy) * k,
         width: rect.width * k,
         height: rect.height * k,
       }))
     }
-    if (this.goodRects && Math.abs(this.zoomLevel - this.goodZoom) > 0.0001) {
+    if (this.goodRects && (Math.abs(this.zoomLevel - this.goodZoom) > 0.0001 ||
+      Math.abs(this.app.screen.width - this.goodCanvasW) > 1 ||
+      Math.abs(this.app.screen.height - this.goodCanvasH) > 1)) {
       return scaleGood()
     }
     if (!force && this.goodRects && performance.now() - this.lastReadAt < 400) {
       return this.goodRects
     }
-    // 回读有 TTL 且只在 zoom === goodZoom 时进行：部分驱动在异尺寸/高倍下
+    // 回读有 TTL 且只在 zoom/画布尺寸与 goodRects 一致时进行：部分驱动在异尺寸/高倍下
     // 会返回损坏像素（局部条带、空帧）。未通过校验的结果不写回 goodRects，
     // 退化为整个包围盒区域——宁可暂时让空白处吃掉点击，也绝不让 SetWindowRgn
     // 把人物裁成碎片（可见性优先）。
@@ -191,6 +201,8 @@ export class Live2d {
     if (this.validateRegions(rects)) {
       this.goodRects = rects
       this.goodZoom = this.zoomLevel
+      this.goodCanvasW = this.app.screen.width
+      this.goodCanvasH = this.app.screen.height
       this.lastReadAt = performance.now()
       return rects
     }
@@ -376,7 +388,7 @@ export class Live2d {
   }
 
   /** 参数化表情：不依赖 .exp3.json，Hiyori/Rice 等单表情模型也可用。 */
-  applyFace(name: 'smile' | 'surprise' | 'blush' | 'wink' | 'reset', durationMs = 2500): void {
+  applyFace(name: 'smile' | 'surprise' | 'blush' | 'wink' | 'angry' | 'sad' | 'proud' | 'sleepy' | 'reset', durationMs = 2500): void {
     if (!this.model) return
     this.ensureParamHook()
     if (this.faceTimer) clearTimeout(this.faceTimer)
@@ -412,6 +424,40 @@ export class Live2d {
         set('ParamEyeLOpen', 1)
         set('ParamEyeROpen', 0)
         set('ParamMouthForm', 0.9)
+        break
+      case 'angry':
+        set('ParamBrowLY', 0.15)
+        set('ParamBrowRY', 0.15)
+        set('ParamBrowLForm', 0.2)
+        set('ParamBrowRForm', 0.2)
+        set('ParamMouthForm', 0.15)
+        set('ParamEyeLOpen', 0.85)
+        set('ParamEyeROpen', 0.85)
+        break
+      case 'sad':
+        set('ParamBrowLY', 0.2)
+        set('ParamBrowRY', 0.2)
+        set('ParamBrowLAngle', 0.25)
+        set('ParamBrowRAngle', 0.25)
+        set('ParamMouthForm', 0.2)
+        set('ParamMouthOpenY', 0.12)
+        set('ParamEyeLOpen', 0.72)
+        set('ParamEyeROpen', 0.72)
+        break
+      case 'proud':
+        set('ParamBrowLY', 0.9)
+        set('ParamBrowRY', 0.9)
+        set('ParamMouthForm', 0.95)
+        set('ParamEyeLSmile', 0.8)
+        set('ParamEyeRSmile', 0.8)
+        set('ParamCheek', 0.55)
+        break
+      case 'sleepy':
+        set('ParamEyeLOpen', 0.22)
+        set('ParamEyeROpen', 0.22)
+        set('ParamMouthOpenY', 0.3)
+        set('ParamBrowLY', 0.3)
+        set('ParamBrowRY', 0.3)
         break
     }
     this.faceTimer = window.setTimeout(() => {
@@ -458,9 +504,13 @@ export class Live2d {
     switch (pose) {
       case 'walk': set('ParamBodyAngleX', 0.58); set('ParamBodyAngleY', 0.54); set('ParamBodyAngleZ', 0.56); set('ParamLeg', 0.38); set('ParamArmLA', 0.68); set('ParamArmRA', 0.32); break
       // walk 的摆臂/迈腿在 ensureParamHook 里按步态相位持续驱动（参考 Shimeji-ee 步态循环思路）。
+      // climb 攀爬：双臂高举交替够位，身体前倾，由步态相位驱动（上下移动时触发）。
+      case 'climb': set('ParamBodyAngleY', 0.62); set('ParamBodyAngleZ', 0.5); set('ParamLeg', 0.5); set('ParamArmLA', 0.9); set('ParamArmRA', 0.1); set('ParamShoulder', 0.75); break
       case 'lie': set('ParamBodyAngleY', 0.2); set('ParamBodyAngleZ', 0.42); set('ParamLeg', 0.2); set('ParamArmLA', 0.42); set('ParamArmRA', 0.58); break
-      case 'kneel': set('ParamBodyAngleY', 0.43); set('ParamBodyAngleZ', 0.52); set('ParamLeg', 0.28); set('ParamArmLA', 0.62); set('ParamArmRA', 0.38); break
-      case 'duck-sit': set('ParamBodyAngleY', 0.34); set('ParamBodyAngleZ', 0.5); set('ParamLeg', 0.14); set('ParamArmLA', 0.55); set('ParamArmRA', 0.45); break
+      // kneel 蹲坐 / duck-sit 鸭子坐 / sit 正坐：腿收起、身体重心下沉、手放腿上。
+      case 'kneel': set('ParamBodyAngleY', 0.48); set('ParamBodyAngleZ', 0.53); set('ParamLeg', 0.22); set('ParamArmLA', 0.58); set('ParamArmRA', 0.42); set('ParamHandL', 0.45); set('ParamHandR', 0.55); set('ParamShoulder', 0.4); break
+      case 'duck-sit': set('ParamBodyAngleY', 0.3); set('ParamBodyAngleZ', 0.52); set('ParamLeg', 0.1); set('ParamArmLA', 0.6); set('ParamArmRA', 0.4); set('ParamHandL', 0.5); set('ParamHandR', 0.5); set('ParamShoulder', 0.7); break
+      case 'sit': set('ParamBodyAngleY', 0.4); set('ParamBodyAngleZ', 0.5); set('ParamLeg', 0.06); set('ParamArmLA', 0.48); set('ParamArmRA', 0.52); set('ParamHandL', 0.4); set('ParamHandR', 0.6); set('ParamShoulder', 0.3); break
       case 'happy': set('ParamMouthForm', 0.92); set('ParamEyeLOpen', 0.86); set('ParamEyeROpen', 0.86); set('ParamEyeLSmile', 1); set('ParamEyeRSmile', 1); break
       case 'angry': set('ParamMouthForm', 0.18); set('ParamBrowLY', 0.18); set('ParamBrowRY', 0.18); set('ParamBodyAngleZ', 0.54); break
       case 'cute': set('ParamMouthForm', 0.78); set('ParamCheek', 0.8); set('ParamBodyAngleZ', 0.47); set('ParamEyeLSmile', 0.9); set('ParamEyeRSmile', 0.9); break
@@ -503,7 +553,13 @@ export class Live2d {
         ['ParamHairFront', 0.3],
         ['ParamHairSide', 0.24],
         ['ParamHairBack', 0.34],
+        ['ParamSideupRibbon', 0.2],
         ['ParamRibbon', 0.2],
+        // 衣物物理：拖拽/甩窗/游走的速度通过弹簧驱动裙摆与肩部（Hiyori 专用参数）。
+        ['ParamSkirt', 0.5],
+        ['ParamSkirt2', 0.38],
+        ['ParamShoulder', 0.22],
+        ['ParamBustY', 0.28],
         ['ParamBodyAngleZ', 0.08],
       ]
       for (const [sid, amp] of swayIds) {
@@ -529,6 +585,14 @@ export class Live2d {
           if (id === 'ParamBodyAngleZ') animatedTarget += span * 0.07 * Math.sin(elapsed * 4.5)
           if (id === 'ParamBodyAngleY') animatedTarget += span * 0.05 * Math.abs(Math.sin(elapsed * 9))
           if (id === 'ParamBodyAngleX') animatedTarget += span * 0.06 * this.walkDir
+        } else if (this.activePose === 'climb') {
+          // 攀爬步态：双臂交替上够 + 蹬腿，节奏比走路慢（参考 Shimeji 攀爬循环）。
+          const reach = Math.sin(elapsed * 5)
+          if (id === 'ParamArmLA') animatedTarget += span * 0.18 * reach
+          if (id === 'ParamArmRA') animatedTarget += span * 0.18 * -reach
+          if (id === 'ParamLeg') animatedTarget += span * 0.28 * reach
+          if (id === 'ParamBodyAngleY') animatedTarget += span * 0.06 * Math.abs(reach)
+          if (id === 'ParamSkirt') animatedTarget += span * 0.25 * -reach
         } else if (this.activePose === 'jump') {
           const bounce = Math.sin(elapsed * 12) * Math.exp(-elapsed * 2.2)
           if (id === 'ParamBodyAngleY') animatedTarget += span * 0.3 * bounce
@@ -586,8 +650,7 @@ export class Live2d {
     if (this.model) this.model.expression(index)
   }
 
-  getParameterRange(id: string): { min: number; max: number } {
-    // Cubism Core 的 min/max API 接受参数索引，不接受字符串 ID。
+  getParameterRange(id: string): { min: number; max: number } {    // Cubism Core 的 min/max API 接受参数索引，不接受字符串 ID。
     const cm = (this.model?.internalModel as unknown as { coreModel?: {
       getParameterIndex: (id: string) => number
       getParameterCount: () => number

@@ -5,6 +5,7 @@ import { currentMonitor, getCurrentWindow } from '@tauri-apps/api/window'
 import { invoke } from '@tauri-apps/api/core'
 import { LogicalSize, PhysicalPosition, PhysicalSize } from '@tauri-apps/api/dpi'
 import { Live2d, type ModelMeta, type PetPose } from './core/live2d'
+import { OUTFIT_CATEGORIES, currentSelection, persistSelection, prepareOutfitTextures } from './core/outfit'
 import { PetSocket, type WsStatus } from './core/ws'
 import { Chat } from './core/chat'
 import { addBoxItem, API_URL, clearApiConfig, discoverApiModels, exportBoxItem, fetchApiStatus, fetchBoxItems, fetchCollaboration, fetchModelCatalog, launchBoxItem, removeBoxItem, saveApiConfig, saveCollaboration, saveModelCatalog, testApiConnection, updateBoxCategory, type ApiProtocol, type ApiStatus, type BoxItem, type CollaborationSettings, type DiscoveredModel, type ModelCapability, type ModelProfile, type ModelTask } from './core/api'
@@ -60,6 +61,16 @@ const boxPos = ref({ x: 0, y: 0 })
 const box = ref<HTMLElement | null>(null)
 const boxItems = ref<BoxItem[]>([])
 const boxBusy = ref(false)
+// 衣柜：右键连点三下打开，按部位即时重新着色纹理。
+const outfitPanelVisible = ref(false)
+const outfitPanel = ref<HTMLElement | null>(null)
+const outfitPanelPos = ref({ x: 0, y: 0 })
+const outfitSelection = ref<Record<string, string>>(currentSelection())
+const outfitCategories = OUTFIT_CATEGORIES
+// 宠物朝向（眼睛看向的一侧）：气泡/面板优先开在朝向侧。
+const petFacing = ref<'left' | 'right'>('right')
+let rightClickCount = 0
+let rightClickTimer: number | undefined
 const BOX_CATEGORIES = ['游戏', '浏览器', '影音图片', '办公文档', '工具应用', '文件夹']
 const customCategories = computed(() => Array.from(new Set(boxItems.value.map((item) => item.category))).filter((c) => !BOX_CATEGORIES.includes(c)))
 const boxCategoryList = computed(() => [...BOX_CATEGORIES, ...customCategories.value])
@@ -77,7 +88,7 @@ const bubbleFading = ref(false)
 const bubbleReady = ref(false)
 const zoomLevel = ref(1)
 const uiScale = computed(() => Math.max(0.85, Math.min(1.5, zoomLevel.value)))
-const FACES = ['smile', 'surprise', 'blush', 'wink'] as const
+const FACES = ['smile', 'surprise', 'blush', 'wink', 'angry', 'sad', 'proud', 'sleepy'] as const
 type PetFace = typeof FACES[number]
 const AUTONOMOUS_POSES: PetPose[] = ['lie', 'kneel', 'duck-sit', 'happy', 'cute', 'sleepy']
 
@@ -157,7 +168,7 @@ async function syncNativeHitRegion() {
   // Live2D/WebGL 某些驱动会短暂返回空像素；保留上一次有效 HWND 区域，
   // 不允许空结果退化成可拦截鼠标的整块矩形。
   if (!regions.length) return
-  const domRegions = [apiPanel.value, bubble.value, box.value].flatMap((element) => {
+  const domRegions = [apiPanel.value, bubble.value, box.value, outfitPanel.value].flatMap((element) => {
     if (!element || !rootRect) return []
     const rect = element.getBoundingClientRect()
     const x = Math.max(0, rect.left - rootRect.left - 2)
@@ -251,6 +262,12 @@ async function loadModel() {
   if (!pet) return
   try {
     status.value = '加载模型中…'
+    // 先按换装选择重着色图集并填充纹理缓存，再加载模型（缓存键一致，命中即用新纹理）。
+    try {
+      await prepareOutfitTextures(currentSelection())
+    } catch {
+      // 换装纹理准备失败不阻塞模型加载，仅回落原色。
+    }
     const m = await pet.load(MODEL_URL)
     meta.value = m
     lastUserInteraction.value = Date.now()
@@ -323,6 +340,7 @@ onMounted(async () => {
       await closeBubble()
       closeApiPanel()
       closeBox()
+      closeOutfitPanel()
       stopAutonomy()
       stopBehavior()
     })
@@ -374,6 +392,7 @@ function onKey(e: KeyboardEvent) {
     void closeBubble()
     closeApiPanel()
     closeBox()
+    closeOutfitPanel()
   }
 }
 
@@ -406,6 +425,8 @@ onBeforeUnmount(() => {
   stopDragDropListener = undefined
   cancelRightPress()
   rightLongPressFired = false
+  if (rightClickTimer !== undefined) clearTimeout(rightClickTimer)
+  rightClickTimer = undefined
   window.removeEventListener('resize', positionBubble)
   window.removeEventListener('resize', positionApiPanel)
   window.removeEventListener('resize', onNativeRegionResize)
@@ -481,7 +502,7 @@ function startAutonomy() {
 }
 
 function maybeAutonomousTalk(reason: string) {
-  if (!pet || !chat || autonomyBusy || chatBubbleVisible.value || apiPanelVisible.value || boxVisible.value || Date.now() < autonomyCooldownUntil) return
+  if (!pet || !chat || autonomyBusy || chatBubbleVisible.value || apiPanelVisible.value || boxVisible.value || outfitPanelVisible.value || Date.now() < autonomyCooldownUntil) return
   if (!reason.includes('点击') && Date.now() - lastUserInteraction.value < 15000) return
   if (wsStatus.value !== 'open' && apiStatus.value.configured) return
   if (Math.random() > (reason.includes('点击') ? 0.35 : 0.22)) return
@@ -664,19 +685,103 @@ function positionBoxPanel() {
   if (!boxVisible.value) return
   const width = box.value?.offsetWidth || Math.min(264 * uiScale.value, window.innerWidth - 16)
   const height = box.value?.offsetHeight || Math.min(420 * uiScale.value, window.innerHeight - 16)
+  const head = headAnchor() ?? { left: 0, right: window.innerWidth, cy: window.innerHeight / 2 }
+  const gap = 8
+  const edge = 8
   if (bubbleWindowLayout) {
-    // 收纳箱固定放在扩展列，绝不覆盖日和。
-    const dpr = Math.max(1, window.devicePixelRatio || 1)
+    // 收纳箱贴头部一侧；扩展列只保证空间下限，不再用列起点做下限钳制（否则离宠物过远）。
+    const rawX = bubbleWindowLayout.side === 'right' ? head.right + gap : head.left - gap - width
     boxPos.value = {
-      x: Math.max(8, Math.min(bubbleWindowLayout.baseWidth / dpr + 8, window.innerWidth - width - 8)),
-      y: 8,
+      x: Math.max(8, Math.min(rawX, window.innerWidth - width - 8)),
+      y: Math.max(8, Math.min(head.cy - height * 0.32, window.innerHeight - height - 8)),
     }
     return
   }
+  const side = petFacing.value
+  const rawX = side === 'right' ? head.right + gap : head.left - gap - width
   boxPos.value = {
-    x: Math.max(8, Math.min(window.innerWidth - width - 8, window.innerWidth - width - 8)),
-    y: Math.max(8, Math.min(window.innerHeight - height - 8, window.innerHeight - height - 8)),
+    x: Math.max(edge, Math.min(rawX, window.innerWidth - width - edge)),
+    y: Math.max(edge, Math.min(head.cy - height * 0.32, window.innerHeight - height - edge)),
   }
+}
+
+function positionOutfitPanel() {
+  if (!outfitPanelVisible.value) return
+  const width = outfitPanel.value?.offsetWidth || Math.min(292 * uiScale.value, window.innerWidth - 16)
+  const height = outfitPanel.value?.offsetHeight || Math.min(430 * uiScale.value, window.innerHeight - 16)
+  const head = headAnchor() ?? { left: 0, right: window.innerWidth, cy: window.innerHeight / 2 }
+  const gap = 8
+  const edge = 8
+  if (bubbleWindowLayout) {
+    const rawX = bubbleWindowLayout.side === 'right' ? head.right + gap : head.left - gap - width
+    outfitPanelPos.value = {
+      x: Math.max(8, Math.min(rawX, window.innerWidth - width - 8)),
+      y: Math.max(8, Math.min(head.cy - height * 0.32, window.innerHeight - height - 8)),
+    }
+    return
+  }
+  const side = petFacing.value
+  const rawX = side === 'right' ? head.right + gap : head.left - gap - width
+  outfitPanelPos.value = {
+    x: Math.max(edge, Math.min(rawX, window.innerWidth - width - edge)),
+    y: Math.max(edge, Math.min(head.cy - height * 0.32, window.innerHeight - height - edge)),
+  }
+}
+
+async function openOutfitPanel() {
+  if (outfitPanelVisible.value || apiPanelVisible.value || boxVisible.value) return
+  outfitPanelVisible.value = true
+  desktopWanderTarget = null
+  stopBehavior()
+  stopAutonomy()
+  lastUserInteraction.value = Date.now()
+  await requestBubbleWindowState(true)
+  await nextTick()
+  positionOutfitPanel()
+  requestAnimationFrame(positionOutfitPanel)
+  scheduleNativeHitRegion()
+  pet?.applyPose('happy', 2000)
+}
+
+function closeOutfitPanel() {
+  if (!outfitPanelVisible.value) return
+  outfitPanelVisible.value = false
+  scheduleNativeHitRegion()
+  void requestBubbleWindowState(uiSpaceDemanded())
+  startBehavior()
+  startAutonomy()
+}
+
+function pickOutfit(categoryId: string, optionId: string) {
+  const next = { ...outfitSelection.value, [categoryId]: optionId }
+  outfitSelection.value = next
+  persistSelection(next)
+  void applyOutfitSelection(next)
+  pet?.applyFace('proud', 1800)
+  lastUserInteraction.value = Date.now()
+}
+
+function resetOutfits() {
+  outfitSelection.value = {}
+  persistSelection({})
+  void applyOutfitSelection({})
+  showSpeech('换回默认制服啦～')
+}
+
+/** 重着色图集 → 热重载模型（约 0.5s 切换动画），缩放与区域同步恢复。 */
+async function applyOutfitSelection(selection: Record<string, string>) {
+  try {
+    await prepareOutfitTextures(selection)
+  } catch {
+    showSpeech('换装失败了，纹理没有准备好…')
+    return
+  }
+  if (!pet) return
+  const m = await pet.load(MODEL_URL)
+  meta.value = m
+  pet.setZoom(zoomLevel.value)
+  if (meta.value) pet.resizeModel(meta.value)
+  scheduleNativeHitRegion()
 }
 
 async function openBox() {
@@ -817,7 +922,7 @@ function positionApiPanel() {
   // 设置面板与气泡同规则：贴头部左右放置，只在空间不够时换边，不允许压到人物。
   const rightSpace = window.innerWidth - edge - (head.right + gap)
   const leftSpace = head.left - gap - edge
-  let side: 'left' | 'right' = bubbleWindowLayout ? bubbleWindowLayout.side : (rightSpace >= leftSpace ? 'right' : 'left')
+  let side: 'left' | 'right' = bubbleWindowLayout ? bubbleWindowLayout.side : petFacing.value
   let x = side === 'right' ? head.right + gap : head.left - gap - width
   if (!bubbleWindowLayout && (side === 'right' ? rightSpace : leftSpace) < Math.min(160 * uiScale.value, width)) {
     side = side === 'right' ? 'left' : 'right'
@@ -956,7 +1061,13 @@ async function stepDesktopWander() {
         x: Math.round(minX + Math.random() * Math.max(1, maxX - minX)),
         y: Math.round(minY + Math.random() * Math.max(1, maxY - minY)),
       }
-      pet.applyPose('walk', 2400)
+      // 朝向随移动方向：气泡/面板优先开在宠物面向的一侧。
+      petFacing.value = desktopWanderTarget.x >= desktopPosition.x ? 'right' : 'left'
+      const dx0 = desktopWanderTarget.x - desktopPosition.x
+      const dy0 = desktopWanderTarget.y - desktopPosition.y
+      // 大幅度向上移动用攀爬姿态（Shimeji 式攀爬步态），其余走路。
+      const movePose: PetPose = Math.abs(dy0) > Math.abs(dx0) * 1.15 && dy0 < 0 ? 'climb' : 'walk'
+      pet.applyPose(movePose, 2400)
       pet.playMotionRandom('Idle').catch(() => {})
       if (Math.random() < 0.65) pet.applyFace(FACES[Math.floor(Math.random() * FACES.length)])
     }
@@ -973,7 +1084,8 @@ async function stepDesktopWander() {
     }
     if (!desktopWalking) {
       desktopWalking = true
-      pet.applyPose('walk', 1600)
+      const movePose: PetPose = Math.abs(dy) > Math.abs(dx) * 1.15 && dy < 0 ? 'climb' : 'walk'
+      pet.applyPose(movePose, 1600)
     }
     pet.setWalkDir(dx)
     pet.extendPose(1600)
@@ -1004,7 +1116,7 @@ async function stepDesktopWander() {
 function startBehavior() {
   stopBehavior()
   behaviorTimer = window.setInterval(() => {
-    if (!pet || chatBubbleVisible.value || apiPanelVisible.value || boxVisible.value || press) return
+    if (!pet || chatBubbleVisible.value || apiPanelVisible.value || boxVisible.value || outfitPanelVisible.value || press) return
     if (Date.now() - lastUserInteraction.value < 12000) return
     if ((window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__) {
       void stepDesktopWander()
@@ -1157,8 +1269,8 @@ async function expandBubbleWindowNow() {
   ])
   if (!position || !size) return
   const dpr = Math.max(1, window.devicePixelRatio || 1)
-  // 扩展列 = 气泡最大宽度 + 两侧 8px 余量：气泡贴头时不会被列宽撑远。
-  const extraWidth = Math.ceil((236 * uiScale.value + 16) * dpr)
+  // 扩展列按最宽面板（API 设置 286）预留：气泡/收纳箱/衣柜都贴得住头部一侧。
+  const extraWidth = Math.ceil((Math.max(236, 286) * uiScale.value + 16) * dpr)
   const canExpandRight = !monitor || position.x + size.width + extraWidth <= monitor.workArea.position.x + monitor.workArea.size.width
   const canExpandLeft = !monitor || position.x - extraWidth >= monitor.workArea.position.x
   const layout: BubbleWindowLayout = {
@@ -1272,8 +1384,9 @@ function positionBubble() {
   const edge = 8
   const rightSpace = window.innerWidth - edge - (head.right + gap)
   const leftSpace = head.left - gap - edge
-  // 气泡只允许出现在头部左侧或右侧：桌面壳跟随扩展列方向，其余场景按空间宽的一侧。
-  let side: 'left' | 'right' = bubbleWindowLayout ? bubbleWindowLayout.side : (rightSpace >= leftSpace ? 'right' : 'left')
+  // 气泡只允许出现在头部左侧或右侧：桌面壳跟随扩展列方向，其余场景优先贴
+  // 眼睛朝向的一侧（用户看着哪边气泡开在哪边），空间不够才换边。
+  let side: 'left' | 'right' = bubbleWindowLayout ? bubbleWindowLayout.side : petFacing.value
   let width = maxWidth
   if (!bubbleWindowLayout) {
     const sideSpace = side === 'right' ? rightSpace : leftSpace
@@ -1309,7 +1422,7 @@ function openBubble() {
   armBubbleDismiss()
 }
 function uiSpaceDemanded() {
-  return chatBubbleVisible.value || boxVisible.value || apiPanelVisible.value
+  return chatBubbleVisible.value || boxVisible.value || apiPanelVisible.value || outfitPanelVisible.value
 }
 
 async function closeBubble() {
@@ -1465,11 +1578,33 @@ function onContextMenu(e: MouseEvent) {
     closeBox()
     return
   }
-  // 透明桌宠窗口本身只承载日和；不再用 Live2D 包围盒拦截右键，避免 DPI/缩放后点到身体边缘无响应。
-  guideVisible.value = false
-  desktopWanderTarget = null
-  if (apiPanelVisible.value) closeApiPanel()
-  else openApiPanel()
+  // 右键连点三下 → 衣柜；单/双击（340ms 内没有第三下）→ API 面板开关。
+  rightClickCount += 1
+  if (rightClickTimer !== undefined) clearTimeout(rightClickTimer)
+  if (rightClickCount >= 3) {
+    rightClickCount = 0
+    rightClickTimer = undefined
+    guideVisible.value = false
+    desktopWanderTarget = null
+    if (apiPanelVisible.value) closeApiPanel()
+    openOutfitPanel()
+    return
+  }
+  rightClickTimer = window.setTimeout(() => {
+    rightClickTimer = undefined
+    const clicks = rightClickCount
+    rightClickCount = 0
+    if (clicks >= 3) {
+      guideVisible.value = false
+      desktopWanderTarget = null
+      openOutfitPanel()
+      return
+    }
+    guideVisible.value = false
+    desktopWanderTarget = null
+    if (apiPanelVisible.value) closeApiPanel()
+    else openApiPanel()
+  }, 340)
 }
 
 function cancelRightPress() {
@@ -1509,6 +1644,9 @@ function onPointerDown(e: PointerEvent) {
 function onPointerMove(e: PointerEvent) {
   if (!pet) return
   pet.focus(e.offsetX, e.offsetY)
+  // 记录眼睛朝向：气泡/面板优先开在宠物看着的那一侧。
+  const bounds = pet.getBounds()
+  if (bounds.width) petFacing.value = e.offsetX >= bounds.x + bounds.width / 2 ? 'right' : 'left'
   if (rightPress && rightPress.pointerId === e.pointerId && Math.hypot(e.clientX - rightPress.clientX, e.clientY - rightPress.clientY) > 7) {
     // 右键拖动视为取消，不再触发展开收纳箱。
     cancelRightPress()
@@ -1699,6 +1837,35 @@ function onWheel(e: WheelEvent) {
     </div>
 
     <div
+      v-if="outfitPanelVisible"
+      ref="outfitPanel"
+      class="outfit-panel"
+      :style="{ left: outfitPanelPos.x + 'px', top: outfitPanelPos.y + 'px' }"
+      @pointerdown.stop
+      @click.stop
+      @contextmenu.prevent="closeOutfitPanel"
+    >
+      <div class="panel-head">
+        <div><strong>日和衣柜</strong><div class="panel-subtitle">右键连点三下打开 · 点色卡即时换装</div></div>
+        <button type="button" class="icon-button" aria-label="关闭衣柜" @click="closeOutfitPanel">×</button>
+      </div>
+      <div v-for="category in outfitCategories" :key="category.id" class="outfit-group">
+        <div class="catalog-title">{{ category.label }}<span v-if="category.note" class="outfit-note">{{ category.note }}</span></div>
+        <div class="outfit-chips">
+          <button
+            v-for="option in category.options"
+            :key="option.id"
+            type="button"
+            class="outfit-chip"
+            :class="{ active: outfitSelection[category.id] === option.id }"
+            @click="pickOutfit(category.id, option.id)"
+          >{{ option.label }}</button>
+        </div>
+      </div>
+      <button type="button" class="secondary-action outfit-reset" @click="resetOutfits">全部恢复默认</button>
+    </div>
+
+    <div
       v-if="reaction"
       class="reaction"
       :style="{ left: reaction.x + 'px', top: reaction.y + 'px' }"
@@ -1724,7 +1891,7 @@ function onWheel(e: WheelEvent) {
       <button class="dismiss-pet" type="button" @click="closePet">隐藏桌宠</button>
       <div v-if="wsError" class="bubble-error">⚠ {{ wsError }}</div>
     </div>
-    <div v-if="guideVisible" class="guide">左键互动 · 按住拖动 · 滚轮缩放 · 右键长按收纳箱 · 右键 API 设置</div>
+    <div v-if="guideVisible" class="guide">左键互动 · 按住拖动 · 滚轮缩放 · 右键长按收纳箱 · 右键三连点衣柜 · 右键 API 设置</div>
 
   </div>
 </template>
@@ -1867,6 +2034,14 @@ body {
 .box-actions { flex: 0 0 auto; display: flex; gap: 3px; }
 .box-actions button { border: 0; background: #eef2f6; color: #637489; border-radius: 7px; font-size: calc(9px * var(--ui-scale)); padding: 3px 6px; cursor: pointer; }
 .box-actions button:disabled { opacity: 0.5; cursor: wait; }
+.outfit-panel { position: absolute; z-index: 86; width: min(calc(292px * var(--ui-scale)), calc(100vw - 16px)); max-height: min(calc(100vh - 16px), calc(470px * var(--ui-scale))); overflow: auto; box-sizing: border-box; padding: calc(12px * var(--ui-scale)); border: 1px solid rgba(91, 117, 145, 0.2); border-radius: calc(14px * var(--ui-scale)); background: rgba(255, 255, 255, 0.97); color: #2f435a; box-shadow: 0 10px 30px rgba(31, 55, 78, 0.24); }
+.outfit-group { margin-bottom: 8px; }
+.outfit-note { margin-left: 6px; color: #9aa6b2; font-size: calc(9px * var(--ui-scale)); }
+.outfit-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.outfit-chip { border: 1px solid #d7e0e8; background: #fbfdfe; color: #40566d; border-radius: 9px; font-size: calc(10px * var(--ui-scale)); padding: 4px 8px; cursor: pointer; }
+.outfit-chip:hover { background: #eef4fa; }
+.outfit-chip.active { background: #6f9bc5; border-color: #6f9bc5; color: white; }
+.outfit-reset { width: 100%; margin-top: 4px; }
 .subtitle {
   position: absolute;
   left: 50%;
