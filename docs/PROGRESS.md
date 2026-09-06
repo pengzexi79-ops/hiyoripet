@@ -272,3 +272,13 @@
 - ✅ 收纳箱：左键长按 650ms 打开；拖喂坐标按 dpr 换算修复"拖入失败"（用户真机已入库 5 个快捷方式）；AI 复核分类（已接 API 时）+ 用户自主改分类（PUT）+ 导出桌面快捷方式（实测生成 notepad.exe.lnk）+ 修复 AI 分类路径把 item 覆盖成列表导致播报 undefined 的 bug。
 - ✅ 步态：行走相位驱动摆臂/迈腿/身体 bob 与方向倾斜，位移按步态调制；双击触发 jump；实测窗口位移 58px 且两帧步态可见差异（walk-a/b.png）。
 - ✅ 门禁与 Release：tsc / vite / compileall / cargo check / Tauri GNU NSIS 全通过；测试数据已清理，用户收纳数据保留。
+
+## 0.1.4 第三轮：布局/吞噬/图标/摆动/数据保护（2026-09-07）
+- ✅ 气泡/收纳箱/API 面板统一申请侧边扩展空间并固定排在扩展列（气泡 x=368 实测），不再覆盖日和；气泡垂直对准头部中心。
+- ✅ 命中区域自愈：提交失败重置去重键重试 + 每 2s 重同步 + 条带>64 按行合并，消除"宠物碎片/不显示"。
+- ✅ 吞噬语义：桌面 .lnk 入库即从桌面移除（记录 original_target），导出按原目标在真实桌面（SHGetFolderPath）重建快捷方式；往返实测 consumed=True → lnk 消失 → 导出重建 → 删除清理。
+- ✅ 收纳卡片化：后端提取 exe/lnk 图标（/api/box/icon/{id}），前端卡片排版（图标+省略号名称+分类下拉+开/出/×），5 条目实测图标全部加载、无错乱。
+- ✅ 互动增强：弹簧摆动物理（拖拽/游走/甩窗速度驱动头发/丝带/身体回弹）；连点头部 3 次触发摸头反馈。
+- ✅ 数据保护：box.json 非空写入自动备份 box.json.bak，读取失败回退备份；用户 5 个收纳条目已恢复并随新 Release 保留。
+- ✅ 门禁与 Release：tsc / vite / compileall / cargo check / Tauri GNU NSIS 全通过。
+- 交付物 SHA-256：HiyoriPet.exe `679BEBA368794C1A6AE2CC7DB88C95E12782968F4BA07F5E4AA92F46C50FB008`；pet-backend.exe `5E0A4DDE690DF71E60711E06ED6B916F7019A9F7DAFAF46FBF49306546FE39B1`；setup `67059D920F25D8AAAF495542B153FCCDFB416F29F7BF31311093DC86EB168D82`；portable `68C656C90B2E56DCDDA33EE83664130C32D7C20024F2437834E4DC463B24B0F8`。

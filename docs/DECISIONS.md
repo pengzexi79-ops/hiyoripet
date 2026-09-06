@@ -100,3 +100,9 @@
 - 步态参考 Shimelee-ee / Shijima-Qt 的"相位驱动"思路：行走期间由 ensureParamHook 按时间相位驱动 ParamLeg/ParamArmLA/RA/BodyAngleZ/BodyAngleY（迈步 bob），位移按 |sin(phase)| 调制减少滑步；行走方向驱动 BodyAngleX 倾斜；新增 jump 姿态（双击触发）。
 - 缩放期间命中区域提交整窗（不裁剪），静止 300ms 后恢复精确区域；区域提交做去重（相同矩形不重复 SetWindowRgn），缩放上限按当前显示器工作区动态钳制，避免窗口超出屏幕造成"放到最大消失"。
 - 收纳箱导出只做桌面快捷方式，不移动/复制原文件，避免大文件拷贝与误删。
+
+## D18 吞噬语义与收纳数据保护（2026-09-07）
+- 桌面 `.lnk` 被收纳即从桌面删除（"吃掉"），条目记录 `original_target` 供导出重建；非桌面或非 lnk 文件只登记不移动，避免误删用户数据。
+- 桌面路径一律以 `SHGetFolderPath(CSIDL_DESKTOP)` 为准（本机实际桌面在 D: 盘），不得用 `Path.home()/Desktop` 猜测。
+- box.json 每次非空写入同步写 `box.json.bak`；读取异常按 主文件→备份 顺序回退，防止收纳数据被意外清空。
+- 气泡/收纳箱/API 面板共用同一侧边扩展空间（互斥需求合并为一个 desired 状态），面板永远排在扩展列，禁止覆盖人物区域。

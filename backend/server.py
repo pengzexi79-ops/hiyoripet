@@ -197,6 +197,20 @@ async def add_box_item(payload: BoxAddInput):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/api/box/icon/{item_id}")
+async def get_box_icon(item_id: str):
+    from fastapi.responses import FileResponse
+
+    png = box_store._icons_dir() / f"{item_id}.png"
+    if not png.exists():
+        items = {item.get("id"): item for item in box_store.list_items()}
+        if item_id in items:
+            box_store.ensure_icon(items[item_id])
+    if not png.exists():
+        raise HTTPException(status_code=404, detail="图标不存在")
+    return FileResponse(png, media_type="image/png")
+
+
 @app.put("/api/box/{item_id}")
 async def update_box_category(item_id: str, payload: BoxCategoryInput):
     try:

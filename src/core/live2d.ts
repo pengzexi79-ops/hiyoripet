@@ -46,6 +46,12 @@ export class Live2d {
   private poseStartedAt = 0
   // 行走方向（-1 左 / 1 右），用于步态倾斜与摆臂相位。
   private walkDir = 1
+  // 拖拽/移动惯性摆动弹簧（头发、丝带、身体的物理回弹）。
+  private swayX = 0
+  private swayVX = 0
+  private swayY = 0
+  private swayVY = 0
+  private swayLastAt = 0
   // 不透明区域提取是 WebGL 回读，代价高；短 TTL 缓存避免每次点击/缩放都回读。
   private regionCache: Array<{ x: number; y: number; width: number; height: number }> | null = null
   private regionCacheAt = 0
@@ -256,6 +262,13 @@ export class Live2d {
     this.walkDir = dir >= 0 ? 1 : -1
   }
 
+  /** 施加一次惯性冲击（窗口移动/拖拽速度），驱动头发与饰物摆动。 */
+  kickSway(vx: number, vy: number): void {
+    const clamp = (v: number) => Math.max(-14, Math.min(14, v))
+    this.swayVX += clamp(vx) * 0.55
+    this.swayVY += clamp(vy) * 0.35
+  }
+
   /** 延长当前姿态时限但不重置步态相位（行走循环持续驱动用）。 */
   extendPose(durationMs: number): void {
     if (!this.model || this.activePose === 'idle') return
@@ -410,6 +423,31 @@ export class Live2d {
       const elapsed = Math.max(0, (performance.now() - this.poseStartedAt) / 1000)
       const wave = Math.sin(elapsed * 8)
       const sway = Math.sin(elapsed * 4)
+      // 弹簧积分：速度越快摆幅越大，松手后阻尼回弹。
+      const nowMs = performance.now()
+      const dt = Math.min(0.05, this.swayLastAt ? (nowMs - this.swayLastAt) / 1000 : 0.016)
+      this.swayLastAt = nowMs
+      const stiff = 42
+      const damp = 5.2
+      this.swayVX += (-stiff * this.swayX - damp * this.swayVX) * dt
+      this.swayX += this.swayVX * dt
+      this.swayVY += (-stiff * this.swayY - damp * this.swayVY) * dt
+      this.swayY += this.swayVY * dt
+      const swayIds: Array<[string, number]> = [
+        ['ParamHairFront', 0.3],
+        ['ParamHairSide', 0.24],
+        ['ParamHairBack', 0.34],
+        ['ParamRibbon', 0.2],
+        ['ParamBodyAngleZ', 0.08],
+      ]
+      for (const [sid, amp] of swayIds) {
+        const range = this.getParameterRange(sid)
+        const mid = (range.min + range.max) / 2
+        const span = range.max - range.min
+        if (span <= 0) continue
+        const value = mid + span * amp * Math.max(-1, Math.min(1, this.swayX / 6)) + span * amp * 0.4 * Math.max(-1, Math.min(1, this.swayY / 8))
+        this.paramOverrides[sid] = Math.max(range.min, Math.min(range.max, value))
+      }
       const ids = new Set([...Object.keys(this.poseBase), ...Object.keys(this.poseTargets)])
       for (const id of ids) {
         const target = this.poseTargets[id] ?? this.poseBase[id]

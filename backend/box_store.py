@@ -24,13 +24,72 @@ def _box_path() -> Path:
     return root / "HiyoriPet" / "box.json"
 
 
-def _read() -> list[dict[str, Any]]:
+def _icons_dir() -> Path:
+    return _box_path().parent / "icons"
+
+
+def _desktop_dir() -> Path | None:
+    import ctypes
+
     try:
-        raw = json.loads(_box_path().read_text(encoding="utf-8"))
-        items = raw.get("items", []) if isinstance(raw, dict) else raw
-        return [item for item in items if isinstance(item, dict) and item.get("path")]
+        buf = ctypes.create_unicode_buffer(260)
+        if ctypes.windll.shell32.SHGetFolderPathW(None, 0, None, 0, buf) == 0:
+            return Path(buf.value)
     except Exception:
-        return []
+        pass
+    return Path.home() / "Desktop"
+
+
+def _lnk_target(lnk: Path) -> str | None:
+    import subprocess
+
+    script = f"$w=(New-Object -ComObject WScript.Shell).CreateShortcut('{lnk}'); Write-Output $w.TargetPath"
+    try:
+        proc = subprocess.run(["powershell", "-NoProfile", "-Command", script], capture_output=True, text=True, timeout=15, creationflags=0x08000000)
+        value = (proc.stdout or "").strip().splitlines()
+        return value[-1] if value else None
+    except Exception:
+        return None
+
+
+def ensure_icon(item: dict[str, Any]) -> str | None:
+    """提取 exe/lnk 关联图标为 PNG，返回路径；失败返回 None（前端回退占位图）。"""
+    import subprocess
+
+    target = Path(str(item.get("path", "")))
+    if not target.exists():
+        return None
+    icons = _icons_dir()
+    icons.mkdir(parents=True, exist_ok=True)
+    png = icons / f"{item.get('id')}.png"
+    if png.exists():
+        return str(png)
+    script = (
+        "Add-Type -AssemblyName System.Drawing; "
+        f"$i=[System.Drawing.Icon]::ExtractAssociatedIcon('{target}'); "
+        f"$i.ToBitmap().Save('{png}')"
+    )
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-Command", script], check=True, timeout=20, creationflags=0x08000000)
+    except Exception:
+        return None
+    return str(png) if png.exists() else None
+
+
+def _parse_items(text: str) -> list[dict[str, Any]]:
+    raw = json.loads(text)
+    items = raw.get("items", []) if isinstance(raw, dict) else raw
+    return [item for item in items if isinstance(item, dict) and item.get("path")]
+
+
+def _read() -> list[dict[str, Any]]:
+    path = _box_path()
+    for candidate in (path, path.with_suffix(".json.bak")):
+        try:
+            return _parse_items(candidate.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+    return []
 
 
 def _write(items: list[dict[str, Any]]) -> None:
@@ -39,6 +98,12 @@ def _write(items: list[dict[str, Any]]) -> None:
     temp = path.with_suffix(".tmp")
     temp.write_text(json.dumps({"items": items}, ensure_ascii=False, indent=2), encoding="utf-8")
     temp.replace(path)
+    if items:
+        # 非空写入留一份备份，异常清空时可回退，避免用户收纳数据丢失。
+        try:
+            (path.with_suffix(".json.bak")).write_text(json.dumps({"items": items}, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
 
 
 def categorize(path: str) -> str:
@@ -80,6 +145,16 @@ def add_item(path: str, name: str = "") -> dict[str, Any]:
             "added_at": datetime.now().isoformat(timespec="seconds"),
         }
         items.append(entry)
+        ensure_icon(entry)
+        # "吃掉"语义：桌面快捷方式入库后从桌面移除（导出可再还原）。
+        desktop = _desktop_dir()
+        if target.suffix.lower() == ".lnk" and desktop and target.parent == desktop:
+            entry["original_target"] = _lnk_target(target) or str(target)
+            try:
+                target.unlink(missing_ok=True)
+                entry["consumed"] = True
+            except Exception:
+                entry["consumed"] = False
         _write(items)
         return entry
 
@@ -113,9 +188,12 @@ def export_shortcut(item_id: str) -> dict[str, Any]:
         raise ValueError("收纳箱中找不到该条目")
     target = Path(str(item.get("path", "")))
     if not target.exists():
-        raise ValueError("原始文件已不存在")
-    desktop = Path.home() / "Desktop"
-    lnk = desktop / f"{item.get('name') or target.name}.lnk"
+        restored = str(item.get("original_target") or "")
+        if not restored or not Path(restored).exists():
+            raise ValueError("原始文件已不存在")
+        target = Path(restored)
+    desktop = _desktop_dir() or Path.home() / "Desktop"
+    lnk = desktop / (Path(str(item.get("name") or target.name)).stem + ".lnk")
     script = (
         "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('" + str(lnk) + "'); "
         "$s.TargetPath='" + str(target) + "'; "

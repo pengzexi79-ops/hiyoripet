@@ -7,7 +7,7 @@ import { LogicalSize, PhysicalPosition, PhysicalSize } from '@tauri-apps/api/dpi
 import { Live2d, type ModelMeta, type PetPose } from './core/live2d'
 import { PetSocket, type WsStatus } from './core/ws'
 import { Chat } from './core/chat'
-import { addBoxItem, clearApiConfig, discoverApiModels, exportBoxItem, fetchApiStatus, fetchBoxItems, fetchCollaboration, fetchModelCatalog, launchBoxItem, removeBoxItem, saveApiConfig, saveCollaboration, saveModelCatalog, testApiConnection, updateBoxCategory, type ApiProtocol, type ApiStatus, type BoxItem, type CollaborationSettings, type DiscoveredModel, type ModelCapability, type ModelProfile, type ModelTask } from './core/api'
+import { addBoxItem, API_URL, clearApiConfig, discoverApiModels, exportBoxItem, fetchApiStatus, fetchBoxItems, fetchCollaboration, fetchModelCatalog, launchBoxItem, removeBoxItem, saveApiConfig, saveCollaboration, saveModelCatalog, testApiConnection, updateBoxCategory, type ApiProtocol, type ApiStatus, type BoxItem, type CollaborationSettings, type DiscoveredModel, type ModelCapability, type ModelProfile, type ModelTask } from './core/api'
 
 // 模型放置于 public/models/Hiyori/（Vite 构建时拷进 dist/models/，由 Tauri 资源一并打包）。
 const MODEL_URL = '/models/Hiyori/Hiyori.model3.json'
@@ -120,6 +120,10 @@ let lastClickAt = 0
 let lastClickX = 0
 let lastClickY = 0
 let dragOverFeedbackAt = 0
+let regionHealTimer: number | undefined
+let lastMovedPos: { x: number; y: number } | null = null
+let headPatCount = 0
+let headPatAt = 0
 
 /** 命中区域同步含 WebGL 回读与 GDI 区域提交，统一去抖，避免缩放/连点时每帧执行。 */
 function scheduleNativeHitRegion(delay = 180) {
@@ -160,20 +164,62 @@ async function syncNativeHitRegion() {
     width: Math.max(1, Math.ceil(rect.width * dpr)),
     height: Math.max(1, Math.ceil(rect.height * dpr)),
   }))
-  const key = JSON.stringify(payload)
+  let finalPayload = payload
+  if (finalPayload.length > 64) {
+    // 条带过多时按行合并，降低 GDI 区域复杂度，避免提交失败。
+    const rows = new Map<number, { x: number; y: number; right: number; bottom: number }>()
+    for (const rect of finalPayload) {
+      const rowKey = Math.floor(rect.y / (10 * dpr))
+      const cur = rows.get(rowKey)
+      if (cur) {
+        cur.x = Math.min(cur.x, rect.x)
+        cur.y = Math.min(cur.y, rect.y)
+        cur.right = Math.max(cur.right, rect.x + rect.width)
+        cur.bottom = Math.max(cur.bottom, rect.y + rect.height)
+      } else {
+        rows.set(rowKey, { x: rect.x, y: rect.y, right: rect.x + rect.width, bottom: rect.y + rect.height })
+      }
+    }
+    finalPayload = [...rows.values()].map((row) => ({ x: row.x, y: row.y, width: row.right - row.x, height: row.bottom - row.y }))
+  }
+  const key = JSON.stringify(finalPayload)
   if (key === lastSubmittedRegion) return
   lastSubmittedRegion = key
-  await invoke('set_hit_region', { rects: payload }).catch(() => {})
+  await invoke('set_hit_region', { rects: finalPayload }).catch(() => {
+    // 提交失败必须允许重试，否则旧区域会长期裁剪画面（宠物"碎片"根因）。
+    lastSubmittedRegion = ''
+  })
 }
 
 /** 缩放进行中提交整窗区域：不做任何裁剪，彻底避免区域与画面错位产生条带乱码。 */
 async function setFullWindowRegion() {
   const dpr = Math.max(1, window.devicePixelRatio || 1)
   const payload = [{ x: 0, y: 0, width: Math.ceil(window.innerWidth * dpr), height: Math.ceil(window.innerHeight * dpr) }]
-  const key = JSON.stringify(payload)
+  let finalPayload = payload
+  if (finalPayload.length > 64) {
+    // 条带过多时按行合并，降低 GDI 区域复杂度，避免提交失败。
+    const rows = new Map<number, { x: number; y: number; right: number; bottom: number }>()
+    for (const rect of finalPayload) {
+      const rowKey = Math.floor(rect.y / (10 * dpr))
+      const cur = rows.get(rowKey)
+      if (cur) {
+        cur.x = Math.min(cur.x, rect.x)
+        cur.y = Math.min(cur.y, rect.y)
+        cur.right = Math.max(cur.right, rect.x + rect.width)
+        cur.bottom = Math.max(cur.bottom, rect.y + rect.height)
+      } else {
+        rows.set(rowKey, { x: rect.x, y: rect.y, right: rect.x + rect.width, bottom: rect.y + rect.height })
+      }
+    }
+    finalPayload = [...rows.values()].map((row) => ({ x: row.x, y: row.y, width: row.right - row.x, height: row.bottom - row.y }))
+  }
+  const key = JSON.stringify(finalPayload)
   if (key === lastSubmittedRegion) return
   lastSubmittedRegion = key
-  await invoke('set_hit_region', { rects: payload }).catch(() => {})
+  await invoke('set_hit_region', { rects: finalPayload }).catch(() => {
+    // 提交失败必须允许重试，否则旧区域会长期裁剪画面（宠物"碎片"根因）。
+    lastSubmittedRegion = ''
+  })
 }
 
 /** 缩放上限跟随当前显示器工作区，避免窗口超出屏幕导致人物"消失"。 */
@@ -235,8 +281,15 @@ onMounted(async () => {
     const initialPosition = await appWindow.outerPosition().catch(() => null)
     if (initialPosition) desktopPosition = { x: initialPosition.x, y: initialPosition.y }
     stopWindowMovedListener = await appWindow.onMoved(({ payload }) => {
+      if (lastMovedPos) {
+        pet?.kickSway(payload.x - lastMovedPos.x, payload.y - lastMovedPos.y)
+      }
+      lastMovedPos = { x: payload.x, y: payload.y }
       desktopPosition = { x: payload.x, y: payload.y }
     })
+    regionHealTimer = window.setInterval(() => {
+      if (!document.hidden) void syncNativeHitRegion()
+    }, 2000)
     stopPetVisibilityListener = await listen('pet-opened', async () => {
       await normalizePetWindowSize()
       status.value = '桌宠已打开'
@@ -325,6 +378,8 @@ onBeforeUnmount(() => {
   stopPetHiddenListener = undefined
   stopWindowMovedListener?.()
   stopWindowMovedListener = undefined
+  if (regionHealTimer !== undefined) clearInterval(regionHealTimer)
+  regionHealTimer = undefined
   stopDragDropListener?.()
   stopDragDropListener = undefined
   if (longPressTimer !== undefined) clearTimeout(longPressTimer)
@@ -585,15 +640,20 @@ function pickImage(event: Event) {
 
 function positionBoxPanel() {
   if (!boxVisible.value) return
-  const b = pet?.getBounds() ?? { x: window.innerWidth / 2, y: window.innerHeight / 2, width: 0, height: 0 }
-  const width = box.value?.offsetWidth || Math.min(252 * uiScale.value, window.innerWidth - 16)
+  const width = box.value?.offsetWidth || Math.min(264 * uiScale.value, window.innerWidth - 16)
   const height = box.value?.offsetHeight || Math.min(420 * uiScale.value, window.innerHeight - 16)
-  const gap = 10
-  const right = window.innerWidth - (b.x + b.width)
-  const rawX = right >= width + gap ? b.x + b.width + gap : b.x - width - gap
+  if (bubbleWindowLayout) {
+    // 收纳箱固定放在扩展列，绝不覆盖日和。
+    const dpr = Math.max(1, window.devicePixelRatio || 1)
+    boxPos.value = {
+      x: Math.max(8, Math.min(bubbleWindowLayout.baseWidth / dpr + 8, window.innerWidth - width - 8)),
+      y: 8,
+    }
+    return
+  }
   boxPos.value = {
-    x: Math.max(8, Math.min(rawX, window.innerWidth - width - 8)),
-    y: Math.max(8, Math.min(b.y + b.height * 0.06, window.innerHeight - height - 8)),
+    x: Math.max(8, Math.min(window.innerWidth - width - 8, window.innerWidth - width - 8)),
+    y: Math.max(8, Math.min(window.innerHeight - height - 8, window.innerHeight - height - 8)),
   }
 }
 
@@ -604,6 +664,7 @@ async function openBox() {
   stopBehavior()
   stopAutonomy()
   lastUserInteraction.value = Date.now()
+  await requestBubbleWindowState(true)
   await nextTick()
   positionBoxPanel()
   requestAnimationFrame(positionBoxPanel)
@@ -615,6 +676,7 @@ function closeBox() {
   if (!boxVisible.value) return
   boxVisible.value = false
   scheduleNativeHitRegion()
+  void requestBubbleWindowState(uiSpaceDemanded())
   startBehavior()
   startAutonomy()
 }
@@ -633,7 +695,8 @@ async function eatPath(path: string) {
     pet?.applyPose('happy', 2600)
     pet?.playMotionRandom('Idle').catch(() => {})
     showReaction(window.innerWidth / 2, window.innerHeight * 0.3)
-    showSpeech(`啊呜～把「${item.name}」吃掉啦，已放进${item.category}收纳格！`)
+    const consumedTip = (item as BoxItem & { consumed?: boolean }).consumed ? '桌面快捷方式也帮你收好了～' : ''
+    showSpeech(`啊呜～把「${item.name}」吃掉啦，已放进${item.category}收纳格！${consumedTip}`)
     void refreshBox()
   } catch (e) {
     showSpeech(`这个我吃不下去：${(e as Error)?.message ?? e}`)
@@ -717,6 +780,14 @@ function positionApiPanel() {
   const b = pet?.getBounds() ?? { x: window.innerWidth / 2, y: window.innerHeight / 2, width: 0, height: 0 }
   const width = apiPanel.value?.offsetWidth || Math.min(286 * uiScale.value, window.innerWidth - 16)
   const height = apiPanel.value?.offsetHeight || Math.min(430 * uiScale.value, window.innerHeight - 16)
+  if (bubbleWindowLayout) {
+    const dpr = Math.max(1, window.devicePixelRatio || 1)
+    apiPanelPos.value = {
+      x: Math.max(8, Math.min(bubbleWindowLayout.baseWidth / dpr + 8, window.innerWidth - width - 8)),
+      y: Math.max(8, Math.min(b.y + b.height * 0.08, window.innerHeight - height - 8)),
+    }
+    return
+  }
   const gap = 10
   const right = window.innerWidth - (b.x + b.width)
   const rawX = right >= width + gap ? b.x + b.width + gap : b.x - width - gap
@@ -733,7 +804,8 @@ async function openApiPanel() {
   stopBehavior()
   stopAutonomy()
   apiPanelVisible.value = true
-  void syncNativeHitRegion()
+  void requestBubbleWindowState(true)
+  scheduleNativeHitRegion()
   lastUserInteraction.value = Date.now()
   void loadApiPanelData()
   positionApiPanel()
@@ -744,7 +816,8 @@ function closeApiPanel() {
   const wasVisible = apiPanelVisible.value
   apiPanelVisible.value = false
   apiError.value = ''
-  void syncNativeHitRegion()
+  void requestBubbleWindowState(uiSpaceDemanded())
+  scheduleNativeHitRegion()
   if (wasVisible && pet) {
     startIdle()
     startBehavior()
@@ -879,6 +952,7 @@ async function stepDesktopWander() {
     // 步态相位调制位移：落脚阶段慢、迈腿阶段快，减少"平移滑动感"。
     const gait = 0.45 + 0.55 * Math.abs(Math.sin(now / 110))
     const step = Math.min(distance, Math.max(1, elapsed * 0.12) * gait)
+    pet.kickSway((dx / distance) * step * 0.5, -step * 0.15)
     const monitor = await currentMonitor()
     const size = await appWindow.outerSize()
     if (!monitor) return
@@ -1160,18 +1234,27 @@ function positionBubble() {
     width = maxWidth
   }
   const headY = b.y + b.height * 0.18
-  const rawX = side === 'right'
+  let rawX = side === 'right'
     ? b.x + b.width + gap
     : side === 'left'
       ? b.x - width - gap
       : b.x + b.width / 2 - width / 2
+  if (bubbleWindowLayout && (side === 'right' || side === 'left')) {
+    // 扩展窗口时气泡固定落在扩展列内，紧贴日和右侧，不再压到人物。
+    const dpr = Math.max(1, window.devicePixelRatio || 1)
+    rawX = bubbleWindowLayout.baseWidth / dpr + 8
+  }
   const rawY = side === 'top'
     ? b.y - height - gap
     : side === 'bottom'
       ? b.y + b.height + gap
       : headY - height * 0.42
   const x = Math.max(edge, Math.min(rawX, window.innerWidth - width - edge))
-  const y = Math.max(edge, Math.min(rawY, window.innerHeight - height - edge))
+  let y = Math.max(edge, Math.min(rawY, window.innerHeight - height - edge))
+  if (bubbleWindowLayout) {
+    // 垂直方向对准头部中心，箭头指向日和头部。
+    y = Math.max(edge, Math.min(headY - height * 0.5, window.innerHeight - height - edge))
+  }
   bubblePos.value = {
     x,
     y,
@@ -1194,13 +1277,17 @@ function openBubble() {
   void prepareBubble()
   armBubbleDismiss()
 }
+function uiSpaceDemanded() {
+  return chatBubbleVisible.value || boxVisible.value || apiPanelVisible.value
+}
+
 async function closeBubble() {
   cancelBubbleDismiss()
   bubbleFading.value = false
   bubbleReady.value = false
   if (!chatBubbleVisible.value && !bubbleWindowLayout) return
   chatBubbleVisible.value = false
-  await requestBubbleWindowState(false)
+  await requestBubbleWindowState(uiSpaceDemanded())
 }
 
 function cancelBubbleDismiss() {
@@ -1313,6 +1400,17 @@ function interactAt(x: number, y: number) {
   lastUserInteraction.value = Date.now()
   status.value = hits.includes('Head') ? '摸摸头～' : hits.includes('Body') ? '被摸到了～' : '戳到啦～'
   tapCount += 1
+  if (hits.includes('Head')) {
+    const nowMs = Date.now()
+    headPatCount = nowMs - headPatAt < 2000 ? headPatCount + 1 : 1
+    headPatAt = nowMs
+    if (headPatCount >= 3) {
+      headPatCount = 0
+      pet.applyPose('happy', 2600)
+      pet.applyFace('smile')
+      showSpeech('嘿嘿，摸摸头最舒服啦～')
+    }
+  }
   pet.playMotionRandom(tapCount % 3 === 0 || Math.random() < 0.35 ? 'Idle' : 'TapBody').catch(() => {})
   const poses: PetPose[] = hits.includes('Head')
     ? ['cute', 'happy', 'surprised']
@@ -1533,18 +1631,23 @@ function onWheel(e: WheelEvent) {
       <div v-for="category in boxCategoryList" :key="category" class="box-group">
         <template v-if="boxItems.filter((entry) => entry.category === category).length">
           <div class="catalog-title">{{ category }} · {{ boxItems.filter((entry) => entry.category === category).length }}</div>
-          <div v-for="item in boxItems.filter((entry) => entry.category === category)" :key="item.id" class="box-row">
-            <div class="model-info"><strong>{{ item.name }}</strong><small>{{ item.path }}</small></div>
-            <input class="category-input" :value="item.category" list="box-categories" :aria-label="`修改 ${item.name} 的分类`" @change="recategorize(item, $event.target.value)" />
-            <button type="button" class="secondary-action" :disabled="boxBusy" @click="launchBox(item)">打开</button>
-            <button type="button" class="secondary-action" :disabled="boxBusy" @click="exportBox(item)">导出</button>
-            <button type="button" class="icon-button" :aria-label="`删除 ${item.name}`" @click="deleteBox(item)">×</button>
+          <div v-for="item in boxItems.filter((entry) => entry.category === category)" :key="item.id" class="box-card">
+            <img class="box-icon" :src="`${API_URL}/api/box/icon/${item.id}`" alt="" @error="(e) => ((e.target as HTMLImageElement).style.visibility = 'hidden')" />
+            <div class="box-card-main">
+              <strong class="box-name" :title="item.name">{{ item.name }}</strong>
+              <small class="box-path" :title="item.path">{{ item.path }}</small>
+            </div>
+            <select class="box-cat" :value="item.category" :aria-label="`修改 ${item.name} 的分类`" @change="recategorize(item, $event.target.value)">
+              <option v-for="c in boxCategoryList" :key="c" :value="c">{{ c }}</option>
+            </select>
+            <div class="box-actions">
+              <button type="button" :disabled="boxBusy" title="打开" @click="launchBox(item)">开</button>
+              <button type="button" :disabled="boxBusy" title="导出到桌面" @click="exportBox(item)">出</button>
+              <button type="button" :aria-label="`删除 ${item.name}`" title="删除" @click="deleteBox(item)">×</button>
+            </div>
           </div>
         </template>
       </div>
-      <datalist id="box-categories">
-        <option v-for="category in boxCategoryList" :key="`cat-${category}`" :value="category"></option>
-      </datalist>
     </div>
 
     <div
@@ -1707,14 +1810,17 @@ body {
 .pending-image { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
 .pending-image img { width: 44px; height: 44px; object-fit: cover; border-radius: 8px; border: 1px solid #d7e0e8; }
 .pending-image button { border: 0; background: transparent; color: #8493a3; font-size: 15px; cursor: pointer; }
-.box-panel { position: absolute; z-index: 85; width: min(calc(252px * var(--ui-scale)), calc(100vw - 16px)); max-height: min(calc(100vh - 16px), calc(420px * var(--ui-scale))); overflow: auto; box-sizing: border-box; padding: calc(12px * var(--ui-scale)); border: 1px solid rgba(91, 117, 145, 0.2); border-radius: calc(14px * var(--ui-scale)); background: rgba(255, 255, 255, 0.97); color: #2f435a; box-shadow: 0 10px 30px rgba(31, 55, 78, 0.24); }
+.box-panel { position: absolute; z-index: 85; width: min(calc(264px * var(--ui-scale)), calc(100vw - 16px)); max-height: min(calc(100vh - 16px), calc(430px * var(--ui-scale))); overflow: auto; box-sizing: border-box; padding: calc(12px * var(--ui-scale)); border: 1px solid rgba(91, 117, 145, 0.2); border-radius: calc(14px * var(--ui-scale)); background: rgba(255, 255, 255, 0.97); color: #2f435a; box-shadow: 0 10px 30px rgba(31, 55, 78, 0.24); }
 .box-empty { margin: 6px 0; color: #7b8a98; font-size: calc(11px * var(--ui-scale)); line-height: 1.5; }
-.box-row { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
-.box-row .model-info { min-width: 0; flex: 1; color: #40566d; }
-.box-row .model-info strong, .box-row .model-info small { display: block; overflow-wrap: anywhere; line-height: 1.25; }
-.box-row .model-info small { color: #7b8a98; font-size: calc(9px * var(--ui-scale)); }
-.box-row button.secondary-action { flex: 0 0 auto; padding: 4px 8px; font-size: calc(10px * var(--ui-scale)); background: #eef2f6; color: #637489; border: 0; border-radius: 8px; cursor: pointer; }
-.category-input { flex: 0 0 auto; width: 62px; min-width: 0; padding: 3px 4px; border: 1px solid #d7e0e8; border-radius: 6px; font-size: calc(10px * var(--ui-scale)); color: #40566d; background: white; outline: none; }
+.box-card { display: flex; align-items: center; gap: 7px; margin: 6px 0; padding: 6px; border: 1px solid #e3e9ef; border-radius: 10px; background: #fbfdfe; min-height: 40px; }
+.box-icon { flex: 0 0 auto; width: 26px; height: 26px; border-radius: 6px; object-fit: contain; background: #eef2f6; }
+.box-card-main { min-width: 0; flex: 1; }
+.box-name { display: block; font-size: calc(11px * var(--ui-scale)); color: #2f435a; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.box-path { display: block; font-size: calc(9px * var(--ui-scale)); color: #93a1af; line-height: 1.3; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.box-cat { flex: 0 0 auto; width: 58px; font-size: calc(9px * var(--ui-scale)); padding: 2px 3px; border: 1px solid #d7e0e8; border-radius: 6px; color: #40566d; background: white; outline: none; }
+.box-actions { flex: 0 0 auto; display: flex; gap: 3px; }
+.box-actions button { border: 0; background: #eef2f6; color: #637489; border-radius: 7px; font-size: calc(9px * var(--ui-scale)); padding: 3px 6px; cursor: pointer; }
+.box-actions button:disabled { opacity: 0.5; cursor: wait; }
 .subtitle {
   position: absolute;
   left: 50%;
