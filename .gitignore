@@ -19,3 +19,6 @@ _installers/mingw.zip
 _installers/rustup-init.exe
 _installers/vs_BuildTools.exe
 _installers/CubismSdkForWeb.zip
+
+backend/build-dist/
+backend/build-work/
