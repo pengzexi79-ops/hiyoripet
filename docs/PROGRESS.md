@@ -289,3 +289,7 @@
 - ✅ 拖喂重做：悬停时视线跟随光标 + 张嘴等待（150ms 节流）+ 光标处反馈标记（700ms 节流）；drop 支持一次吃多个文件；成功反馈为"张嘴接住→开心咀嚼→播报分类"。
 - ✅ 后端：桌面 .url 快捷方式与 .lnk 同等"吃掉+可还原"（original_target 记 URL，导出写 [InternetShortcut] INI）；exe/普通文件维持只登记不移动。
 - ✅ 门禁：tsc --noEmit / vite build / python compileall / cargo check（见提交信息）。
+
+## 已知问题（2026-09-06 真机验证时发现，待下轮处理）
+- 高倍缩放（用户实测 2.2x）下发生气泡展开/收起后模型可能错位（真机复现"只看到腿"）；干净重启后渲染正常。涉及 resizeModel/pinPetToBaseWindow 与 DPR（本机 1.37）耦合，属既有路径，本轮未改动；下轮需用 CDP 远程调试（WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9223）挂仓内运行时状态定位。
+- 自主说话触发概率偏低（22%/次、90-210s 周期），长时间无气泡属预期行为。
