@@ -18,4 +18,5 @@ export type ServerMsg =
   | { type: 'ai-response'; text: string; audio?: string; volumes?: number[]; emotion: string }
   | { type: 'transcription'; text: string }
   | { type: 'tool-status'; tool: string; status: string }
+  | { type: 'desktop-activity'; app: string; title?: string }
   | { type: 'error'; message: string }

@@ -10,6 +10,8 @@ export interface ChatHandlers {
   onTyping?: (typing: boolean) => void
   onError?: (msg: string) => void
   onApiStatus?: (status: Extract<ServerMsg, { type: 'api-status' }>) => void
+  // 桌面感知：后端轮询到用户切换了前台应用时推送（app 为窗口标题）。
+  onDesktopActivity?: (appTitle: string) => void
 }
 
 export class Chat {
@@ -42,6 +44,9 @@ export class Chat {
         break
       case 'transcription':
         this.handlers.onSubtitle?.(m.text)
+        break
+      case 'desktop-activity':
+        this.handlers.onDesktopActivity?.(m.app || '')
         break
       case 'api-status':
         this.handlers.onApiStatus?.(m)

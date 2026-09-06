@@ -67,6 +67,7 @@ const outfitPanel = ref<HTMLElement | null>(null)
 const outfitPanelPos = ref({ x: 0, y: 0 })
 const outfitSelection = ref<Record<string, string>>(currentSelection())
 const outfitCategories = OUTFIT_CATEGORIES
+const lastOutfitColor = ref<Record<string, string>>(currentSelection())
 // 宠物朝向（眼睛看向的一侧）：气泡/面板优先开在朝向侧。
 const petFacing = ref<'left' | 'right'>('right')
 let rightClickCount = 0
@@ -90,7 +91,7 @@ const zoomLevel = ref(1)
 const uiScale = computed(() => Math.max(0.85, Math.min(1.5, zoomLevel.value)))
 const FACES = ['smile', 'surprise', 'blush', 'wink', 'angry', 'sad', 'proud', 'sleepy'] as const
 type PetFace = typeof FACES[number]
-const AUTONOMOUS_POSES: PetPose[] = ['lie', 'kneel', 'duck-sit', 'happy', 'cute', 'sleepy']
+const AUTONOMOUS_POSES: PetPose[] = ['lie', 'kneel', 'duck-sit', 'sit', 'happy', 'cute', 'sleepy']
 
 let pet: Live2d | null = null
 let socket: PetSocket | null = null
@@ -212,37 +213,6 @@ async function syncNativeHitRegion() {
   })
 }
 
-/** 缩放进行中提交整窗区域：不做任何裁剪，彻底避免区域与画面错位产生条带乱码。 */
-async function setFullWindowRegion() {
-  const dpr = Math.max(1, window.devicePixelRatio || 1)
-  const payload = [{ x: 0, y: 0, width: Math.ceil(window.innerWidth * dpr), height: Math.ceil(window.innerHeight * dpr) }]
-  let finalPayload = payload
-  if (finalPayload.length > 900) {
-    // 条带过多时按行合并，降低 GDI 区域复杂度，避免提交失败。
-    const rows = new Map<number, { x: number; y: number; right: number; bottom: number }>()
-    for (const rect of finalPayload) {
-      const rowKey = Math.floor(rect.y / (10 * dpr))
-      const cur = rows.get(rowKey)
-      if (cur) {
-        cur.x = Math.min(cur.x, rect.x)
-        cur.y = Math.min(cur.y, rect.y)
-        cur.right = Math.max(cur.right, rect.x + rect.width)
-        cur.bottom = Math.max(cur.bottom, rect.y + rect.height)
-      } else {
-        rows.set(rowKey, { x: rect.x, y: rect.y, right: rect.x + rect.width, bottom: rect.y + rect.height })
-      }
-    }
-    finalPayload = [...rows.values()].map((row) => ({ x: row.x, y: row.y, width: row.right - row.x, height: row.bottom - row.y }))
-  }
-  const key = JSON.stringify(finalPayload)
-  if (key === lastSubmittedRegion) return
-  lastSubmittedRegion = key
-  await invoke('set_hit_region', { rects: finalPayload }).catch(() => {
-    // 提交失败必须允许重试，否则旧区域会长期裁剪画面（宠物"碎片"根因）。
-    lastSubmittedRegion = ''
-  })
-}
-
 /** 缩放上限跟随当前显示器工作区，避免窗口超出屏幕导致人物"消失"。 */
 async function maxZoomLevel() {
   const now = Date.now()
@@ -257,6 +227,7 @@ async function maxZoomLevel() {
 function onNativeRegionResize() {
   scheduleNativeHitRegion(240)
 }
+
 
 async function loadModel() {
   if (!pet) return
@@ -474,6 +445,19 @@ function connectChat() {
       openBubble()
     },
     onApiStatus: applyApiStatus,
+    onDesktopActivity: (app) => {
+      // 桌面感知：后端轮询到用户切换应用时闲聊（仅窗口标题，不读键入内容）。
+      if (!app || chatBubbleVisible.value || apiPanelVisible.value || boxVisible.value || outfitPanelVisible.value) return
+      if (Date.now() - lastUserInteraction.value < 20000 || Date.now() < autonomyCooldownUntil) return
+      if (Math.random() > 0.65) return
+      autonomyCooldownUntil = Date.now() + 90000
+      if (apiStatus.value.configured && chat) {
+        chat.sendText(`用户刚刚把前台窗口切到了「${app}」。请用一句自然、简短的中文对此做出关心或调侃，不要提及系统提示。`, undefined, 'scene')
+      } else {
+        const lines = [`在忙「${app}」呀？我陪你～`, `切到「${app}」啦？加油加油！`, `「${app}」开好久了，记得起来动一动哦。`, `需要我帮你盯着「${app}」吗？开玩笑的啦～`]
+        showSpeech(lines[Math.floor(Math.random() * lines.length)])
+      }
+    },
   })
   socket.connect()
   void fetchApiStatus().then(applyApiStatus).catch(() => {})
@@ -494,10 +478,10 @@ function stopAutonomy() {
 
 function startAutonomy() {
   stopAutonomy()
-  const wait = 35000 + Math.random() * 35000
+  const wait = 30000 + Math.random() * 30000
   autonomyTimer = window.setTimeout(() => {
     maybeAutonomousTalk('安静陪伴了一会儿')
-    autonomyTimer = window.setTimeout(() => startAutonomy(), 90000 + Math.random() * 120000)
+    autonomyTimer = window.setTimeout(() => startAutonomy(), 60000 + Math.random() * 70000)
   }, wait)
 }
 
@@ -729,7 +713,9 @@ function positionOutfitPanel() {
 }
 
 async function openOutfitPanel() {
-  if (outfitPanelVisible.value || apiPanelVisible.value || boxVisible.value) return
+  if (outfitPanelVisible.value) return
+  if (apiPanelVisible.value) closeApiPanel()
+  if (boxVisible.value) closeBox()
   outfitPanelVisible.value = true
   desktopWanderTarget = null
   stopBehavior()
@@ -755,10 +741,30 @@ function closeOutfitPanel() {
 function pickOutfit(categoryId: string, optionId: string) {
   const next = { ...outfitSelection.value, [categoryId]: optionId }
   outfitSelection.value = next
+  if (optionId !== 'off') {
+    lastOutfitColor.value = { ...lastOutfitColor.value, [categoryId]: optionId }
+  }
   persistSelection(next)
   void applyOutfitSelection(next)
   pet?.applyFace('proud', 1800)
   lastUserInteraction.value = Date.now()
+}
+
+function isOutfitOff(categoryId: string): boolean {
+  return outfitSelection.value[categoryId] === 'off'
+}
+
+function takeOffCategory(category: { id: string; label: string }) {
+  pickOutfit(category.id, 'off')
+  showSpeech(`把${category.label}脱下来啦，轻一点别着凉～`)
+}
+
+function wearCategory(category: { id: string; label: string; options: { id: string; off?: boolean }[] }) {
+  const previous = lastOutfitColor.value[category.id]
+  const fallback = category.options.find((item) => !item.off)
+  const optionId = previous && category.options.some((item) => item.id === previous && !item.off) ? previous : (fallback?.id || '')
+  if (optionId) pickOutfit(category.id, optionId)
+  showSpeech(`穿好${category.label}了，好看吗？`)
 }
 
 function resetOutfits() {
@@ -785,7 +791,9 @@ async function applyOutfitSelection(selection: Record<string, string>) {
 }
 
 async function openBox() {
-  if (apiPanelVisible.value || boxVisible.value) return
+  if (boxVisible.value) return
+  if (apiPanelVisible.value) closeApiPanel()
+  if (outfitPanelVisible.value) closeOutfitPanel()
   boxVisible.value = true
   desktopWanderTarget = null
   stopBehavior()
@@ -825,8 +833,9 @@ async function eatPaths(paths: string[]) {
     else if (!firstError) firstError = (result.reason as Error)?.message ?? String(result.reason)
   }
   if (eaten.length) {
-    // 先张嘴接住，再开心咀嚼，动作衔接成一次完整的"吃"。
+    // 进食演出：张嘴接住 → 咀嚼 → 开心拍手。
     pet?.applyPose('surprised', 650)
+    pet?.chew(1100)
     window.setTimeout(() => {
       pet?.applyPose('happy', 2600)
       pet?.playMotionRandom('Idle').catch(() => {})
@@ -1065,8 +1074,8 @@ async function stepDesktopWander() {
       petFacing.value = desktopWanderTarget.x >= desktopPosition.x ? 'right' : 'left'
       const dx0 = desktopWanderTarget.x - desktopPosition.x
       const dy0 = desktopWanderTarget.y - desktopPosition.y
-      // 大幅度向上移动用攀爬姿态（Shimeji 式攀爬步态），其余走路。
-      const movePose: PetPose = Math.abs(dy0) > Math.abs(dx0) * 1.15 && dy0 < 0 ? 'climb' : 'walk'
+      // 大幅度向上移动用攀爬姿态（Shimeji 式攀爬步态），远距离用跑步，其余走路。
+      const movePose: PetPose = Math.abs(dy0) > Math.abs(dx0) * 1.15 && dy0 < 0 ? 'climb' : (Math.hypot(dx0, dy0) > 900 ? 'run' : 'walk')
       pet.applyPose(movePose, 2400)
       pet.playMotionRandom('Idle').catch(() => {})
       if (Math.random() < 0.65) pet.applyFace(FACES[Math.floor(Math.random() * FACES.length)])
@@ -1084,7 +1093,7 @@ async function stepDesktopWander() {
     }
     if (!desktopWalking) {
       desktopWalking = true
-      const movePose: PetPose = Math.abs(dy) > Math.abs(dx) * 1.15 && dy < 0 ? 'climb' : 'walk'
+      const movePose: PetPose = Math.abs(dy) > Math.abs(dx) * 1.15 && dy < 0 ? 'climb' : (distance > 900 ? 'run' : 'walk')
       pet.applyPose(movePose, 1600)
     }
     pet.setWalkDir(dx)
@@ -1482,8 +1491,9 @@ async function applyZoom(nextZoom: number) {
     pet.syncRendererSize()
     pet.setZoom(zoomLevel.value)
     if (meta.value) pet.resizeModel(meta.value)
-    void setFullWindowRegion()
-    scheduleNativeHitRegion(300)
+    // 缩放期间区域由 scaleGood 按倍率精确换算，不再提交整窗区域——整窗区域一旦
+    // 未及时恢复，整片桌面都无法点击（用户在最大缩放时实测复现的半透明遮挡）。
+    scheduleNativeHitRegion(60)
     if (beforePosition && beforeSize) {
       const afterSize = await appWindow.outerSize().catch(() => null)
       if (afterSize) {
@@ -1578,33 +1588,22 @@ function onContextMenu(e: MouseEvent) {
     closeBox()
     return
   }
-  // 右键连点三下 → 衣柜；单/双击（340ms 内没有第三下）→ API 面板开关。
-  rightClickCount += 1
+  // 右键分级计时：每击重置 1 秒定时器，到点按连击数分发——
+  // 1 击 = API 设置，2 击 = 收纳箱，3 击 = 衣柜（用户裁定的重要交互语义）。
+  rightClickCount = Math.min(rightClickCount + 1, 3)
   if (rightClickTimer !== undefined) clearTimeout(rightClickTimer)
-  if (rightClickCount >= 3) {
-    rightClickCount = 0
-    rightClickTimer = undefined
-    guideVisible.value = false
-    desktopWanderTarget = null
-    if (apiPanelVisible.value) closeApiPanel()
-    openOutfitPanel()
-    return
-  }
   rightClickTimer = window.setTimeout(() => {
     rightClickTimer = undefined
     const clicks = rightClickCount
     rightClickCount = 0
-    if (clicks >= 3) {
-      guideVisible.value = false
-      desktopWanderTarget = null
-      openOutfitPanel()
-      return
-    }
     guideVisible.value = false
     desktopWanderTarget = null
-    if (apiPanelVisible.value) closeApiPanel()
+    lastUserInteraction.value = Date.now()
+    if (clicks >= 3) openOutfitPanel()
+    else if (clicks === 2) openBox()
+    else if (apiPanelVisible.value) closeApiPanel()
     else openApiPanel()
-  }, 340)
+  }, 1000)
 }
 
 function cancelRightPress() {
@@ -1810,7 +1809,7 @@ function onWheel(e: WheelEvent) {
       @contextmenu.prevent="closeBox"
     >
       <div class="panel-head">
-        <div><strong>应用收纳箱</strong><div class="panel-subtitle">右键长按宠物打开 · 拖文件到日和身上喂食收纳</div></div>
+        <div><strong>应用收纳箱</strong><div class="panel-subtitle">右键连点两下打开（长按也行）· 拖文件到日和身上喂食收纳</div></div>
         <button type="button" class="icon-button" aria-label="关闭收纳箱" @click="closeBox">×</button>
       </div>
       <div v-if="!boxItems.length" class="box-empty">还没有存货～把应用或文件拖到日和身上，她会吃掉并分类存好。</div>
@@ -1846,20 +1845,26 @@ function onWheel(e: WheelEvent) {
       @contextmenu.prevent="closeOutfitPanel"
     >
       <div class="panel-head">
-        <div><strong>日和衣柜</strong><div class="panel-subtitle">右键连点三下打开 · 点色卡即时换装</div></div>
+        <div><strong>日和衣柜</strong><div class="panel-subtitle">右键连点三下打开 · 色卡换装 · 支持穿脱</div></div>
         <button type="button" class="icon-button" aria-label="关闭衣柜" @click="closeOutfitPanel">×</button>
       </div>
       <div v-for="category in outfitCategories" :key="category.id" class="outfit-group">
         <div class="catalog-title">{{ category.label }}<span v-if="category.note" class="outfit-note">{{ category.note }}</span></div>
         <div class="outfit-chips">
-          <button
-            v-for="option in category.options"
-            :key="option.id"
-            type="button"
-            class="outfit-chip"
-            :class="{ active: outfitSelection[category.id] === option.id }"
-            @click="pickOutfit(category.id, option.id)"
-          >{{ option.label }}</button>
+          <template v-if="isOutfitOff(category.id)">
+            <button type="button" class="outfit-chip wear" @click="wearCategory(category)">🧺 穿上</button>
+          </template>
+          <template v-else>
+            <button
+              v-for="option in category.options.filter((item) => !item.off)"
+              :key="option.id"
+              type="button"
+              class="outfit-chip"
+              :class="{ active: outfitSelection[category.id] === option.id }"
+              @click="pickOutfit(category.id, option.id)"
+            >{{ option.label }}</button>
+            <button v-if="category.supportsOff" type="button" class="outfit-chip off-chip" @click="takeOffCategory(category)">✋ 脱下</button>
+          </template>
         </div>
       </div>
       <button type="button" class="secondary-action outfit-reset" @click="resetOutfits">全部恢复默认</button>
@@ -1891,7 +1896,7 @@ function onWheel(e: WheelEvent) {
       <button class="dismiss-pet" type="button" @click="closePet">隐藏桌宠</button>
       <div v-if="wsError" class="bubble-error">⚠ {{ wsError }}</div>
     </div>
-    <div v-if="guideVisible" class="guide">左键互动 · 按住拖动 · 滚轮缩放 · 右键长按收纳箱 · 右键三连点衣柜 · 右键 API 设置</div>
+    <div v-if="guideVisible" class="guide">左键互动 · 按住拖动 · 滚轮缩放 · 右键1击设置 2击收纳箱 3击衣柜 · 长按收纳箱</div>
 
   </div>
 </template>

@@ -1,6 +1,7 @@
 # FastAPI + WebSocket conversation service (contracts C2/C6).
 import asyncio
 import json
+import random
 from datetime import datetime
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
@@ -243,6 +244,7 @@ async def launch_box_item(payload: BoxLaunchInput):
 @app.websocket("/ws")
 async def ws_endpoint(ws: WebSocket):
     await ws.accept()
+    _ws_clients.add(ws)
     sc = get_service_context()
     await ws.send_json(_status_message(sc.api_status()))
     try:
@@ -263,6 +265,68 @@ async def ws_endpoint(ws: WebSocket):
                 await ws.send_json({"type": "error", "message": f"未知消息类型: {mtype}"})
     except WebSocketDisconnect:
         pass
+    finally:
+        _ws_clients.discard(ws)
+
+
+class _ForegroundPoller:
+    """轮询 Windows 前台窗口：识别用户当前使用的应用并推送给桌宠，
+    让日和能对"你正在做什么"做出场景化反应（仅窗口标题，不读键入内容）。"""
+
+    def __init__(self) -> None:
+        self.last_title = ""
+
+    @staticmethod
+    def current_title() -> str:
+        import ctypes
+
+        try:
+            user32 = ctypes.windll.user32
+            hwnd = user32.GetForegroundWindow()
+            if not hwnd:
+                return ""
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length <= 0:
+                return ""
+            buf = ctypes.create_unicode_buffer(length + 1)
+            user32.GetWindowTextW(hwnd, buf, length + 1)
+            return (buf.value or "").strip()
+        except Exception:
+            return ""
+
+    @staticmethod
+    def short_name(title: str) -> str:
+        segments = [part.strip() for part in title.split(" - ") if part.strip()]
+        return (segments[-1] if segments else title)[:24]
+
+    async def run(self) -> None:
+        while True:
+            await asyncio.sleep(55 + random.random() * 25)
+            title = self.current_title()
+            if not title or title == self.last_title:
+                continue
+            self.last_title = title
+            app = self.short_name(title)
+            if not app or not _ws_clients:
+                continue
+            payload = json.dumps({"type": "desktop-activity", "app": app, "title": title[:60]})
+            dead = []
+            for client in list(_ws_clients):
+                try:
+                    await client.send_text(payload)
+                except Exception:
+                    dead.append(client)
+            for client in dead:
+                _ws_clients.discard(client)
+
+
+_ws_clients: set[WebSocket] = set()
+_foreground_poller = _ForegroundPoller()
+
+
+@app.on_event("startup")
+async def _start_foreground_poller() -> None:
+    asyncio.create_task(_foreground_poller.run())
 
 
 async def _handle_text(ws: WebSocket, sc, text: str, image=None, task=None):

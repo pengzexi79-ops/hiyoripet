@@ -24,7 +24,7 @@ export interface ModelMeta {
 }
 
 export type PetPose =
-  | 'idle' | 'walk' | 'climb' | 'lie' | 'kneel' | 'duck-sit' | 'sit'
+  | 'idle' | 'walk' | 'run' | 'climb' | 'lie' | 'kneel' | 'duck-sit' | 'sit'
   | 'happy' | 'angry' | 'cute' | 'surprised' | 'sleepy' | 'jump'
 
 export class Live2d {
@@ -63,6 +63,8 @@ export class Live2d {
   private lastReadAt = 0
   private paramHook: { off: (event: string, listener: () => void) => void } | null = null
   private paramListener: (() => void) | null = null
+  // 进食咀嚼：时间窗内每帧回写张嘴参数，形成"啊呜啊呜"的咀嚼动画。
+  private chewUntil = 0
 
   initApp(canvas: HTMLCanvasElement): void {
     // PIXI v6/v7 通用构造器写法（v8 才改 await app.init()）。backgroundAlpha:0 保证透明。
@@ -503,7 +505,8 @@ export class Live2d {
     neutral()
     switch (pose) {
       case 'walk': set('ParamBodyAngleX', 0.58); set('ParamBodyAngleY', 0.54); set('ParamBodyAngleZ', 0.56); set('ParamLeg', 0.38); set('ParamArmLA', 0.68); set('ParamArmRA', 0.32); break
-      // walk 的摆臂/迈腿在 ensureParamHook 里按步态相位持续驱动（参考 Shimeji-ee 步态循环思路）。
+      // walk/run/climb 的摆臂/迈腿在 ensureParamHook 里按步态相位持续驱动（参考 Shimeji-ee 步态循环思路）。
+      case 'run': set('ParamBodyAngleX', 0.62); set('ParamBodyAngleY', 0.58); set('ParamLeg', 0.45); set('ParamArmLA', 0.88); set('ParamArmRA', 0.12); set('ParamMouthOpenY', 0.25); set('ParamShoulder', 0.6); break
       // climb 攀爬：双臂高举交替够位，身体前倾，由步态相位驱动（上下移动时触发）。
       case 'climb': set('ParamBodyAngleY', 0.62); set('ParamBodyAngleZ', 0.5); set('ParamLeg', 0.5); set('ParamArmLA', 0.9); set('ParamArmRA', 0.1); set('ParamShoulder', 0.75); break
       case 'lie': set('ParamBodyAngleY', 0.2); set('ParamBodyAngleZ', 0.42); set('ParamLeg', 0.2); set('ParamArmLA', 0.42); set('ParamArmRA', 0.58); break
@@ -539,6 +542,10 @@ export class Live2d {
       const elapsed = Math.max(0, (performance.now() - this.poseStartedAt) / 1000)
       const wave = Math.sin(elapsed * 8)
       const sway = Math.sin(elapsed * 4)
+      // 咀嚼动画：进食演出期间强制张嘴起伏。
+      if (performance.now() < this.chewUntil) {
+        this.paramOverrides['ParamMouthOpenY'] = 0.3 + 0.35 * Math.abs(Math.sin(performance.now() / 70))
+      }
       // 弹簧积分：速度越快摆幅越大，松手后阻尼回弹。
       const nowMs = performance.now()
       const dt = Math.min(0.05, this.swayLastAt ? (nowMs - this.swayLastAt) / 1000 : 0.016)
@@ -555,11 +562,14 @@ export class Live2d {
         ['ParamHairBack', 0.34],
         ['ParamSideupRibbon', 0.2],
         ['ParamRibbon', 0.2],
-        // 衣物物理：拖拽/甩窗/游走的速度通过弹簧驱动裙摆与肩部（Hiyori 专用参数）。
+        // 衣物/四肢物理：拖拽、甩窗、游走的速度经弹簧驱动裙摆、肩部与手臂，
+        // 拖得越快甩得越大（paramOverrides 在姿态之后回写，优先级更高）。
         ['ParamSkirt', 0.5],
         ['ParamSkirt2', 0.38],
         ['ParamShoulder', 0.22],
         ['ParamBustY', 0.28],
+        ['ParamArmLA', 0.12],
+        ['ParamArmRA', 0.12],
         ['ParamBodyAngleZ', 0.08],
       ]
       for (const [sid, amp] of swayIds) {
@@ -578,13 +588,24 @@ export class Live2d {
         const span = range.max - range.min
         let animatedTarget = target
         if (this.activePose === 'walk') {
+          // 走路步态：大幅迈腿 + 双臂反向摆动 + 身体上下起伏（Shimeji 式循环）。
           const stepWave = Math.sin(elapsed * 9)
-          if (id === 'ParamLeg') animatedTarget += span * 0.34 * stepWave
-          if (id === 'ParamArmLA') animatedTarget += span * 0.26 * -stepWave
-          if (id === 'ParamArmRA') animatedTarget += span * 0.26 * stepWave
+          if (id === 'ParamLeg') animatedTarget += span * 0.55 * stepWave
+          if (id === 'ParamArmLA') animatedTarget += span * 0.36 * -stepWave
+          if (id === 'ParamArmRA') animatedTarget += span * 0.36 * stepWave
           if (id === 'ParamBodyAngleZ') animatedTarget += span * 0.07 * Math.sin(elapsed * 4.5)
-          if (id === 'ParamBodyAngleY') animatedTarget += span * 0.05 * Math.abs(Math.sin(elapsed * 9))
+          if (id === 'ParamBodyAngleY') animatedTarget += span * 0.1 * Math.abs(Math.sin(elapsed * 9))
           if (id === 'ParamBodyAngleX') animatedTarget += span * 0.06 * this.walkDir
+          if (id === 'ParamSkirt') animatedTarget += span * 0.2 * stepWave
+        } else if (this.activePose === 'run') {
+          // 跑步：更快的步频、更大的摆臂、身体前倾。
+          const stepWave = Math.sin(elapsed * 13)
+          if (id === 'ParamLeg') animatedTarget += span * 0.42 * stepWave
+          if (id === 'ParamArmLA') animatedTarget += span * 0.42 * -stepWave
+          if (id === 'ParamArmRA') animatedTarget += span * 0.42 * stepWave
+          if (id === 'ParamBodyAngleY') animatedTarget += span * 0.12 * Math.abs(Math.sin(elapsed * 13))
+          if (id === 'ParamBodyAngleX') animatedTarget += span * 0.12 * this.walkDir
+          if (id === 'ParamSkirt') animatedTarget += span * 0.3 * stepWave
         } else if (this.activePose === 'climb') {
           // 攀爬步态：双臂交替上够 + 蹬腿，节奏比走路慢（参考 Shimeji 攀爬循环）。
           const reach = Math.sin(elapsed * 5)
@@ -648,6 +669,13 @@ export class Live2d {
 
   async playExpressions(index: number): Promise<void> {
     if (this.model) this.model.expression(index)
+  }
+
+  /** 进食咀嚼动画：在 duration 内强制 ParamMouthOpenY 起伏（拖喂演出用）。 */
+  chew(durationMs = 1000): void {
+    if (!this.model) return
+    this.ensureParamHook()
+    this.chewUntil = performance.now() + durationMs
   }
 
   getParameterRange(id: string): { min: number; max: number } {    // Cubism Core 的 min/max API 接受参数索引，不接受字符串 ID。
