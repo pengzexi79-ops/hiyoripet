@@ -1,0 +1,5 @@
+﻿PATH_APPENDED = yes
+.rustup = empty -> junction -> D:\rust\rustup
+.cargo = created junction -> D:\rust\cargo
+VERIFY rustup: True
+VERIFY cargo : True

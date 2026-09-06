@@ -1,0 +1,1 @@
+const {spawn}=require('child_process'); const p=spawn('D:\\codex\\pet-next\\release\\HiyoriPet\\HiyoriPet.exe',[],{detached:true,stdio:'ignore',windowsHide:true,env:{...process.env,WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:'--remote-debugging-port=9224'}}); p.unref(); console.log(p.pid)

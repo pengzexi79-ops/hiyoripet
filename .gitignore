@@ -4,9 +4,6 @@ src-tauri/target
 src-tauri/gen/schemas
 .target
 .mingw
-_installers
-models/
-public/cubism-core/
 *.log
 .DS_Store
 .env
@@ -14,10 +11,11 @@ public/cubism-core/
 backend/.venv
 __pycache__/
 *.pyc
-src-tauri/resources/backend/*.exe
-release/
-
-# Local smoke-test scripts and screenshots
-_verification/
+src-tauri/resources/
 backend/build/
-backend/pet-backend.spec
+
+# Third-party toolchain installers stay out of the repo (re-downloadable, not project files)
+_installers/mingw.zip
+_installers/rustup-init.exe
+_installers/vs_BuildTools.exe
+_installers/CubismSdkForWeb.zip

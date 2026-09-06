@@ -1,0 +1,46 @@
+const { createRequire } = require('module');
+const req = createRequire(process.cwd() + '\\x.cjs');
+const { chromium } = req('C:\\Users\\Windows\\.cache\\codex-runtimes\\codex-primary-runtime\\dependencies\\node\\node_modules\\playwright');
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+(async () => {
+  const b = await chromium.connectOverCDP('http://127.0.0.1:9224');
+  const p = b.contexts()[0].pages()[0];
+  const out = {};
+  for (let i = 0; i < 4; i++) { await p.mouse.move(180, 300); await p.mouse.wheel(0, -120); await sleep(90); }
+  await p.screenshot({ path: '_verification/zoom-mid.png', omitBackground: true });
+  out.zoomed = await p.evaluate(() => ({ w: innerWidth, h: innerHeight }));
+  await p.mouse.click(Math.round(out.zoomed.w / 2), Math.round(out.zoomed.h * 0.45));
+  await sleep(300);
+  out.reactionZoomed = await p.evaluate(() => !!document.querySelector('.reaction'));
+  for (let i = 0; i < 5; i++) { await p.mouse.wheel(0, 120); await sleep(90); }
+  await sleep(500);
+  out.restored = await p.evaluate(() => ({ w: innerWidth, h: innerHeight }));
+  const size = out.restored;
+  await p.mouse.move(Math.round(size.w / 2), Math.round(size.h * 0.45));
+  await p.mouse.down();
+  await sleep(950);
+  await p.mouse.up();
+  await sleep(500);
+  out.boxOpen = await p.locator('.box-panel').count();
+  await p.evaluate(() => window.petApi?.dispatch({ type: 'box-add', path: 'C:\\Windows\\notepad.exe' }));
+  await sleep(900);
+  out.boxRows = await p.locator('.box-row').count();
+  out.boxText = (await p.locator('.box-panel').textContent().catch(() => ''))?.slice(0, 160);
+  const launch = p.getByRole('button', { name: '打开' });
+  if (await launch.count()) await launch.first().click();
+  await sleep(1500);
+  out.notepad = await p.evaluate(() => 'check-via-ps');
+  const del = p.locator('.box-row button.icon-button');
+  if (await del.count()) await del.first().click();
+  await sleep(600);
+  out.boxRowsAfterDelete = await p.locator('.box-row').count();
+  await p.screenshot({ path: '_verification/box-panel.png', omitBackground: true });
+  await p.locator('button[aria-label="关闭收纳箱"]').click();
+  await sleep(400);
+  out.boxClosed = await p.locator('.box-panel').count();
+  await p.mouse.click(Math.round(size.w / 2), Math.round(size.h * 0.45));
+  await sleep(300);
+  out.reactionAfter = await p.evaluate(() => !!document.querySelector('.reaction'));
+  await b.close();
+  console.log(JSON.stringify(out, null, 2));
+})().catch((e) => { console.error(e); process.exit(1); });

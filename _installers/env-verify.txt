@@ -1,0 +1,5 @@
+﻿PROC_RUSTUP_HOME = 
+PROC_CARGO_HOME  = 
+USER_RUSTUP_HOME = D:\rust\rustup
+USER_CARGO_HOME  = D:\rust\cargo
+USER_PATH_HAS_CARGO = False

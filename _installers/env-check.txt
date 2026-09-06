@@ -1,0 +1,4 @@
+﻿RUSTUP_HOME = D:\rust\rustup
+CARGO_HOME  = D:\rust\cargo
+TARGET_DIR  = D:\rust\target
+D drive free: 527.6 GB
