@@ -56,6 +56,10 @@ export class Live2d {
   private regionCache: Array<{ x: number; y: number; width: number; height: number }> | null = null
   private regionCacheAt = 0
   private regionCacheZoom = 1
+  // 回读完整性基线：部分驱动在高倍缩放下返回损坏像素（稀碎矩形会把人物裁成碎片），
+  // 新回读结果与上次可信结果面积偏差超阈值时退回兜底轮廓，坏数据不进 GDI。
+  private lastGoodRegionArea = 0
+  private lastGoodRegionZoom = 1
   private paramHook: { off: (event: string, listener: () => void) => void } | null = null
   private paramListener: (() => void) | null = null
 
@@ -82,6 +86,10 @@ export class Live2d {
     const height = Math.max(1, Math.round(this.view.clientHeight || window.innerHeight))
     if (this.app.screen.width !== width || this.app.screen.height !== height) {
       this.app.renderer.resize(width, height)
+      // 区域坐标属于当前 canvas；窗口尺寸变化后，旧缓存不能继续按旧中心缩放。
+      this.regionCache = null
+      this.regionCacheAt = 0
+      this.regionCacheZoom = this.zoomLevel
     }
   }
 
@@ -163,17 +171,16 @@ export class Live2d {
   getOpaqueRegions(padding = 3, force = false): Array<{ x: number; y: number; width: number; height: number }> {
     if (!this.model || !this.app) return []
     if (this.regionCache && Math.abs(this.zoomLevel - this.regionCacheZoom) > 0.0001) {
-      // 缩放是围绕画布中心的均匀变换：缓存矩形直接按倍率比例换算，避免缩放期间再做 GPU 回读。
+      // 缩放围绕 canvas 中心进行；缓存保留在首次回读的坐标系，避免多次缩放累积漂移。
       const k = this.zoomLevel / this.regionCacheZoom
-      this.regionCache = this.regionCache.map((rect) => ({
-        x: rect.x * k,
-        y: rect.y * k,
+      const cx = this.app.screen.width / 2
+      const cy = this.app.screen.height / 2
+      return this.regionCache.map((rect) => ({
+        x: cx + (rect.x - cx) * k,
+        y: cy + (rect.y - cy) * k,
         width: rect.width * k,
         height: rect.height * k,
       }))
-      this.regionCacheZoom = this.zoomLevel
-      this.regionCacheAt = performance.now()
-      return this.regionCache
     }
     if (!force && this.regionCache && performance.now() - this.regionCacheAt < 400) return this.regionCache
     const rects = this.computeOpaqueSegments(padding)
@@ -242,6 +249,23 @@ export class Live2d {
           }
         }
       }
+      // 回读完整性校验：站姿人物对包围盒覆盖率不可能低于 4%。
+      if (regions.length) {
+        let opaqueArea = 0
+        for (const rect of regions) opaqueArea += rect.width * rect.height
+        const boundsArea = Math.max(1, bounds.width * bounds.height)
+        if (opaqueArea < boundsArea * 0.04) return fallback()
+        // 与上次可信区域比较（按缩放比换算）：姿态/动作只会小幅改变覆盖率，
+        // 大幅偏离说明回读损坏，宁可用兜底轮廓也不把碎片区域交给 SetWindowRgn。
+        if (this.lastGoodRegionArea > 0) {
+          const expected = this.lastGoodRegionArea * Math.pow(this.zoomLevel / this.lastGoodRegionZoom, 2)
+          if (expected > 0 && (opaqueArea < expected * 0.45 || opaqueArea > expected * 2.2)) {
+            return fallback()
+          }
+        }
+        this.lastGoodRegionArea = opaqueArea
+        this.lastGoodRegionZoom = this.zoomLevel
+      }
       return regions.length ? regions.slice(0, 240) : fallback()
     } catch {
       // A transient Live2D layout mutation should preserve the previous native
@@ -272,12 +296,16 @@ export class Live2d {
   /** 延长当前姿态时限但不重置步态相位（行走循环持续驱动用）。 */
   extendPose(durationMs: number): void {
     if (!this.model || this.activePose === 'idle') return
+    // 行走/姿态持续改变轮廓；节流地失效区域缓存，避免命中的不透明区域长期滞后。
+    const now = performance.now()
+    if (now - this.regionCacheAt > 300) this.regionCacheAt = 0
     if (this.poseTimer) clearTimeout(this.poseTimer)
     this.poseTimer = window.setTimeout(() => {
       this.poseTargets = {}
       this.activePose = 'idle'
       this.poseStartedAt = performance.now()
       this.poseTimer = undefined
+      this.regionCacheAt = 0
     }, Math.max(800, durationMs))
   }
 
@@ -362,6 +390,8 @@ export class Live2d {
   applyPose(pose: PetPose, durationMs = 3600): void {
     if (!this.model) return
     this.ensureParamHook()
+    // 姿态会持续改变模型轮廓（摆臂/迈腿/跳跃），旧的区域缓存会裁掉新手脚。
+    this.regionCacheAt = 0
     if (this.poseTimer) clearTimeout(this.poseTimer)
     this.activePose = pose
     this.poseStartedAt = performance.now()
@@ -408,6 +438,7 @@ export class Live2d {
       this.activePose = 'idle'
       this.poseStartedAt = performance.now()
       this.poseTimer = undefined
+      this.regionCacheAt = 0
     }, Math.max(800, durationMs))
   }
 
@@ -583,3 +614,4 @@ export class Live2d {
     this.view = null
   }
 }
+
