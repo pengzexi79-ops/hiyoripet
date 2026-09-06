@@ -282,3 +282,10 @@
 - ✅ 数据保护：box.json 非空写入自动备份 box.json.bak，读取失败回退备份；用户 5 个收纳条目已恢复并随新 Release 保留。
 - ✅ 门禁与 Release：tsc / vite / compileall / cargo check / Tauri GNU NSIS 全通过。
 - 交付物 SHA-256：HiyoriPet.exe `679BEBA368794C1A6AE2CC7DB88C95E12782968F4BA07F5E4AA92F46C50FB008`；pet-backend.exe `5E0A4DDE690DF71E60711E06ED6B916F7019A9F7DAFAF46FBF49306546FE39B1`；setup `67059D920F25D8AAAF495542B153FCCDFB416F29F7BF31311093DC86EB168D82`；portable `68C656C90B2E56DCDDA33EE83664130C32D7C20024F2437834E4DC463B24B0F8`。
+
+## 收纳箱手势重做 + 头部锚定气泡 + 拖喂反馈（2026-09-06）
+- ✅ 收纳箱打开方式改为右键长按 650ms；左键长按逻辑删除。右键短按仍切换 API 面板 / 关闭收纳箱；长按触发后吞掉 contextmenu 防止误弹 API 面板。
+- ✅ 气泡定位重写为头部锚定：取模型不透明区域顶部 32% 的左右边缘与垂直中心，气泡贴边放在头部左/右（间隙 10px），绝不遮挡人物；删除 top/bottom 回退；修复左扩展窗口时气泡压人的 bug。
+- ✅ 拖喂重做：悬停时视线跟随光标 + 张嘴等待（150ms 节流）+ 光标处反馈标记（700ms 节流）；drop 支持一次吃多个文件；成功反馈为"张嘴接住→开心咀嚼→播报分类"。
+- ✅ 后端：桌面 .url 快捷方式与 .lnk 同等"吃掉+可还原"（original_target 记 URL，导出写 [InternetShortcut] INI）；exe/普通文件维持只登记不移动。
+- ✅ 门禁：tsc --noEmit / vite build / python compileall / cargo check（见提交信息）。

@@ -72,7 +72,7 @@ const guideVisible = ref(true)
 const reaction = ref<{ text: string; x: number; y: number } | null>(null)
 const chatBubbleVisible = ref(false)
 const bubble = ref<HTMLElement | null>(null)
-const bubblePos = ref({ x: 0, y: 0, width: 236, side: 'right' as 'left' | 'right' | 'top' | 'bottom', arrowY: 28 })
+const bubblePos = ref({ x: 0, y: 0, width: 236, side: 'right' as 'left' | 'right', arrowY: 28 })
 const bubbleFading = ref(false)
 const bubbleReady = ref(false)
 const zoomLevel = ref(1)
@@ -111,7 +111,10 @@ let zoomBusy = false
 let nativeRegionRequest = 0
 let hideInFlight = false
 let hitRegionTimer: number | undefined
-let longPressTimer: number | undefined
+// 右键长按 650ms 打开收纳箱；右键短按松开走 contextmenu → API 面板。
+let rightPressTimer: number | undefined
+let rightPress: { pointerId: number; clientX: number; clientY: number } | null = null
+let rightLongPressFired = false
 let stopDragDropListener: UnlistenFn | undefined
 let lastSubmittedRegion = ''
 let workAreaCache: { w: number; h: number; at: number } | null = null
@@ -120,6 +123,7 @@ let lastClickAt = 0
 let lastClickX = 0
 let lastClickY = 0
 let dragOverFeedbackAt = 0
+let dragOverMarkAt = 0
 let regionHealTimer: number | undefined
 let lastMovedPos: { x: number; y: number } | null = null
 let headPatCount = 0
@@ -315,10 +319,16 @@ onMounted(async () => {
       const dpr = Math.max(1, window.devicePixelRatio || 1)
       if (payload.type === 'enter' || payload.type === 'over') {
         const nowMs = Date.now()
-        if (nowMs - dragOverFeedbackAt > 600) {
+        const pos = payload.position ? { x: payload.position.x / dpr, y: payload.position.y / dpr } : null
+        // 眼睛盯着拖进来的东西并张嘴等着（参考 Shimeji 的注视反馈），节流避免每帧触发姿态。
+        if (pos && nowMs - dragOverFeedbackAt > 150) {
           dragOverFeedbackAt = nowMs
+          pet?.focus(pos.x, pos.y)
           pet?.applyPose('surprised', 900)
-          showReaction(window.innerWidth / 2, window.innerHeight * 0.25)
+        }
+        if (pos && nowMs - dragOverMarkAt > 700) {
+          dragOverMarkAt = nowMs
+          showReaction(pos.x, pos.y)
         }
         return
       }
@@ -329,7 +339,7 @@ onMounted(async () => {
       const overBox = !!boxRect && !!pos && pos.x >= boxRect.left && pos.x <= boxRect.right && pos.y >= boxRect.top && pos.y <= boxRect.bottom
       const overPet = !pos || !b || (pos.x >= b.x - 24 && pos.x <= b.x + b.width + 24 && pos.y >= b.y - 24 && pos.y <= b.y + b.height + 24)
       if (!overPet && !overBox) return
-      void eatPath(payload.paths[0])
+      void eatPaths(payload.paths)
     })
   }
   // M3：建立后端对话通道
@@ -382,8 +392,8 @@ onBeforeUnmount(() => {
   regionHealTimer = undefined
   stopDragDropListener?.()
   stopDragDropListener = undefined
-  if (longPressTimer !== undefined) clearTimeout(longPressTimer)
-  longPressTimer = undefined
+  cancelRightPress()
+  rightLongPressFired = false
   window.removeEventListener('resize', positionBubble)
   window.removeEventListener('resize', positionApiPanel)
   window.removeEventListener('resize', onNativeRegionResize)
@@ -689,18 +699,28 @@ async function refreshBox() {
   }
 }
 
-async function eatPath(path: string) {
-  try {
-    const { item } = await addBoxItem(path)
-    pet?.applyPose('happy', 2600)
-    pet?.playMotionRandom('Idle').catch(() => {})
-    showReaction(window.innerWidth / 2, window.innerHeight * 0.3)
-    const consumedTip = (item as BoxItem & { consumed?: boolean }).consumed ? '桌面快捷方式也帮你收好了～' : ''
-    showSpeech(`啊呜～把「${item.name}」吃掉啦，已放进${item.category}收纳格！${consumedTip}`)
-    void refreshBox()
-  } catch (e) {
-    showSpeech(`这个我吃不下去：${(e as Error)?.message ?? e}`)
+async function eatPaths(paths: string[]) {
+  const results = await Promise.allSettled(paths.map((p) => addBoxItem(p)))
+  const eaten: BoxItem[] = []
+  let firstError = ''
+  for (const result of results) {
+    if (result.status === 'fulfilled') eaten.push(result.value.item)
+    else if (!firstError) firstError = (result.reason as Error)?.message ?? String(result.reason)
   }
+  if (eaten.length) {
+    // 先张嘴接住，再开心咀嚼，动作衔接成一次完整的"吃"。
+    pet?.applyPose('surprised', 650)
+    window.setTimeout(() => {
+      pet?.applyPose('happy', 2600)
+      pet?.playMotionRandom('Idle').catch(() => {})
+    }, 650)
+    showReaction(window.innerWidth / 2, window.innerHeight * 0.3)
+    const names = eaten.map((item) => `「${item.name}」`).join('、')
+    const consumedTip = eaten.some((item) => (item as BoxItem & { consumed?: boolean }).consumed) ? '桌面也帮你收拾干净啦～' : ''
+    showSpeech(`啊呜～把 ${names} 吃掉啦，已放进${eaten[0].category}收纳格！${consumedTip}`)
+    void refreshBox()
+  }
+  if (firstError) showSpeech(`这个我吃不下去：${firstError}`)
 }
 
 async function launchBox(item: BoxItem) {
@@ -1049,7 +1069,7 @@ function onApiAction(event: Event) {
     subtitle.value = action.text
     openBubble()
   }
-  if (action.type === 'box-add') void eatPath(action.path)
+  if (action.type === 'box-add') void eatPaths([action.path])
   if (action.type === 'wander') {
     nextWanderAt = 0
     desktopWanderTarget = null
@@ -1205,62 +1225,61 @@ async function prepareBubble() {
   scheduleNativeHitRegion()
 }
 
+/** 头部锚点：取模型不透明区域顶部带（头部）的左右边缘与垂直中心，气泡贴边放置、绝不盖到人物。 */
+function headAnchor() {
+  if (!pet) return null
+  const b = pet.getBounds()
+  if (!b.width || !b.height) return null
+  const headBottom = b.y + b.height * 0.32
+  const rects = pet.getOpaqueRegions(3).filter((rect) => {
+    const cy = rect.y + rect.height / 2
+    return cy >= b.y && cy <= headBottom
+  })
+  const zone = rects.length ? rects : [{ x: b.x, y: b.y, width: b.width, height: b.height * 0.3 }]
+  let left = Infinity
+  let right = -Infinity
+  let top = Infinity
+  let bottom = -Infinity
+  for (const rect of zone) {
+    left = Math.min(left, rect.x)
+    right = Math.max(right, rect.x + rect.width)
+    top = Math.min(top, rect.y)
+    bottom = Math.max(bottom, rect.y + rect.height)
+  }
+  return { left, right, cy: (top + bottom) / 2 }
+}
+
 function positionBubble() {
   if (!pet || !chatBubbleVisible.value) return
-  const b = pet.getBounds()
+  const head = headAnchor()
+  if (!head) return
   const maxWidth = Math.min(236 * uiScale.value, Math.max(120, window.innerWidth - 16))
   const measured = bubble.value?.getBoundingClientRect()
   const height = measured?.height || Math.min(220 * uiScale.value, window.innerHeight - 16)
-  const gap = 12
+  const gap = 10
   const edge = 8
-  const minSideWidth = Math.min(112 * uiScale.value, maxWidth)
-  const rightSpace = Math.max(0, window.innerWidth - b.x - b.width - gap - edge)
-  const leftSpace = Math.max(0, b.x - gap - edge)
-  let side: 'left' | 'right' | 'top' | 'bottom' = bubbleWindowLayout?.side ?? (rightSpace >= leftSpace ? 'right' : 'left')
-  let width = bubbleWindowLayout
-    ? maxWidth
-    : Math.min(maxWidth, Math.max(minSideWidth, side === 'right' ? rightSpace : leftSpace))
-  if (!bubbleWindowLayout && (side === 'right' ? rightSpace : leftSpace) < minSideWidth) {
-    side = side === 'right' ? 'left' : 'right'
-    width = Math.min(maxWidth, Math.max(72, side === 'right' ? rightSpace : leftSpace))
+  const rightSpace = window.innerWidth - edge - (head.right + gap)
+  const leftSpace = head.left - gap - edge
+  // 气泡只允许出现在头部左侧或右侧：桌面壳跟随扩展列方向，其余场景按空间宽的一侧。
+  let side: 'left' | 'right' = bubbleWindowLayout ? bubbleWindowLayout.side : (rightSpace >= leftSpace ? 'right' : 'left')
+  let width = maxWidth
+  if (!bubbleWindowLayout) {
+    const sideSpace = side === 'right' ? rightSpace : leftSpace
+    if (sideSpace < Math.min(150 * uiScale.value, maxWidth)) {
+      const otherSpace = side === 'right' ? leftSpace : rightSpace
+      if (otherSpace > sideSpace) side = side === 'right' ? 'left' : 'right'
+      width = Math.max(96, Math.min(maxWidth, side === 'right' ? rightSpace : leftSpace))
+    }
   }
-  const topSpace = Math.max(0, b.y - gap - edge)
-  const bottomSpace = Math.max(0, window.innerHeight - b.y - b.height - gap - edge)
-  if (!bubbleWindowLayout && topSpace >= height && topSpace > (side === 'right' ? rightSpace : leftSpace) && topSpace >= bottomSpace) {
-    side = 'top'
-    width = maxWidth
-  } else if (!bubbleWindowLayout && bottomSpace >= height && bottomSpace > (side === 'right' ? rightSpace : leftSpace)) {
-    side = 'bottom'
-    width = maxWidth
-  }
-  const headY = b.y + b.height * 0.18
-  let rawX = side === 'right'
-    ? b.x + b.width + gap
-    : side === 'left'
-      ? b.x - width - gap
-      : b.x + b.width / 2 - width / 2
-  if (bubbleWindowLayout && (side === 'right' || side === 'left')) {
-    // 扩展窗口时气泡固定落在扩展列内，紧贴日和右侧，不再压到人物。
-    const dpr = Math.max(1, window.devicePixelRatio || 1)
-    rawX = bubbleWindowLayout.baseWidth / dpr + 8
-  }
-  const rawY = side === 'top'
-    ? b.y - height - gap
-    : side === 'bottom'
-      ? b.y + b.height + gap
-      : headY - height * 0.42
-  const x = Math.max(edge, Math.min(rawX, window.innerWidth - width - edge))
-  let y = Math.max(edge, Math.min(rawY, window.innerHeight - height - edge))
-  if (bubbleWindowLayout) {
-    // 垂直方向对准头部中心，箭头指向日和头部。
-    y = Math.max(edge, Math.min(headY - height * 0.5, window.innerHeight - height - edge))
-  }
+  // 依据头部不透明边缘贴边放置：x 锚定轮廓，不是窗口/包围盒，间隙小且不会遮挡。
+  const x = Math.max(edge, Math.min(side === 'right' ? head.right + gap : head.left - gap - width, window.innerWidth - width - edge))
+  const y = Math.max(edge, Math.min(head.cy - height * 0.5, window.innerHeight - height - edge))
   bubblePos.value = {
     x,
     y,
     width,
     side,
-    arrowY: Math.max(18, Math.min(height - 18, headY - y)),
+    arrowY: Math.max(18, Math.min(height - 18, head.cy - y)),
   }
 }
 function openBubble() {
@@ -1425,6 +1444,11 @@ function onContextMenu(e: MouseEvent) {
   e.preventDefault()
   e.stopPropagation()
   if (!pet) return
+  // 右键长按已打开收纳箱时，吞掉随后的 contextmenu，避免又弹出 API 面板。
+  if (rightLongPressFired) {
+    rightLongPressFired = false
+    return
+  }
   if (boxVisible.value) {
     closeBox()
     return
@@ -1436,8 +1460,29 @@ function onContextMenu(e: MouseEvent) {
   else openApiPanel()
 }
 
+function cancelRightPress() {
+  if (rightPressTimer !== undefined) clearTimeout(rightPressTimer)
+  rightPressTimer = undefined
+  rightPress = null
+}
+
 function onPointerDown(e: PointerEvent) {
-  if (e.button !== 0 || !pet) return
+  if (!pet) return
+  if (e.button === 2) {
+    rightPress = { pointerId: e.pointerId, clientX: e.clientX, clientY: e.clientY }
+    rightLongPressFired = false
+    canvas.value?.setPointerCapture(e.pointerId)
+    if (rightPressTimer !== undefined) clearTimeout(rightPressTimer)
+    rightPressTimer = window.setTimeout(() => {
+      rightPressTimer = undefined
+      rightPress = null
+      rightLongPressFired = true
+      if (canvas.value?.hasPointerCapture(e.pointerId)) canvas.value.releasePointerCapture(e.pointerId)
+      openBox()
+    }, 650)
+    return
+  }
+  if (e.button !== 0) return
   const hits = pet.hitTest(e.offsetX, e.offsetY)
   if (!hits.length && !pet.containsPoint(e.offsetX, e.offsetY)) return
   closeBubble()
@@ -1445,13 +1490,6 @@ function onPointerDown(e: PointerEvent) {
   guideVisible.value = false
   canvas.value?.setPointerCapture(e.pointerId)
   press = { pointerId: e.pointerId, clientX: e.clientX, clientY: e.clientY, x: e.offsetX, y: e.offsetY }
-  if (longPressTimer !== undefined) clearTimeout(longPressTimer)
-  longPressTimer = window.setTimeout(() => {
-    longPressTimer = undefined
-    press = null
-    if (canvas.value?.hasPointerCapture(e.pointerId)) canvas.value.releasePointerCapture(e.pointerId)
-    openBox()
-  }, 650)
   pet.focus(e.offsetX, e.offsetY)
 }
 
@@ -1459,12 +1497,12 @@ function onPointerDown(e: PointerEvent) {
 function onPointerMove(e: PointerEvent) {
   if (!pet) return
   pet.focus(e.offsetX, e.offsetY)
+  if (rightPress && rightPress.pointerId === e.pointerId && Math.hypot(e.clientX - rightPress.clientX, e.clientY - rightPress.clientY) > 7) {
+    // 右键拖动视为取消，不再触发展开收纳箱。
+    cancelRightPress()
+  }
   if (!press || press.pointerId !== e.pointerId) return
   if (Math.hypot(e.clientX - press.clientX, e.clientY - press.clientY) < 7) return
-  if (longPressTimer !== undefined) {
-    clearTimeout(longPressTimer)
-    longPressTimer = undefined
-  }
   press = null
   desktopWanderTarget = null
   lastUserInteraction.value = Date.now()
@@ -1473,9 +1511,10 @@ function onPointerMove(e: PointerEvent) {
 }
 function onPointerUp(e: PointerEvent) {
   if (canvas.value?.hasPointerCapture(e.pointerId)) canvas.value.releasePointerCapture(e.pointerId)
-  if (longPressTimer !== undefined) {
-    clearTimeout(longPressTimer)
-    longPressTimer = undefined
+  if (e.button === 2) {
+    // 短按松开：让随后的 contextmenu 决定开 API 面板还是关收纳箱。
+    cancelRightPress()
+    return
   }
   if (!press || press.pointerId !== e.pointerId) return
   const p = press
@@ -1497,10 +1536,7 @@ function onPointerUp(e: PointerEvent) {
 }
 function onPointerCancel(e: PointerEvent) {
   if (canvas.value?.hasPointerCapture(e.pointerId)) canvas.value.releasePointerCapture(e.pointerId)
-  if (longPressTimer !== undefined) {
-    clearTimeout(longPressTimer)
-    longPressTimer = undefined
-  }
+  if (rightPress?.pointerId === e.pointerId) cancelRightPress()
   press = null
 }
 
@@ -1624,7 +1660,7 @@ function onWheel(e: WheelEvent) {
       @contextmenu.prevent="closeBox"
     >
       <div class="panel-head">
-        <div><strong>应用收纳箱</strong><div class="panel-subtitle">长按宠物打开 · 拖文件到日和身上喂食收纳</div></div>
+        <div><strong>应用收纳箱</strong><div class="panel-subtitle">右键长按宠物打开 · 拖文件到日和身上喂食收纳</div></div>
         <button type="button" class="icon-button" aria-label="关闭收纳箱" @click="closeBox">×</button>
       </div>
       <div v-if="!boxItems.length" class="box-empty">还没有存货～把应用或文件拖到日和身上，她会吃掉并分类存好。</div>
@@ -1676,7 +1712,7 @@ function onWheel(e: WheelEvent) {
       <button class="dismiss-pet" type="button" @click="closePet">隐藏桌宠</button>
       <div v-if="wsError" class="bubble-error">⚠ {{ wsError }}</div>
     </div>
-    <div v-if="guideVisible" class="guide">左键互动 · 按住拖动 · 滚轮缩放 · 右键 API 设置</div>
+    <div v-if="guideVisible" class="guide">左键互动 · 按住拖动 · 滚轮缩放 · 右键长按收纳箱 · 右键 API 设置</div>
 
   </div>
 </template>
@@ -1777,8 +1813,6 @@ body {
 }
 .chat-bubble.right::after { left: -7px; }
 .chat-bubble.left::after { right: -7px; transform: rotate(225deg); }
-.chat-bubble.top::after { left: calc(50% - 6px); top: auto; bottom: -7px; transform: rotate(315deg); }
-.chat-bubble.bottom::after { left: calc(50% - 6px); top: -7px; transform: rotate(135deg); }
 .bubble-head, .bubble-input-row {
   display: flex;
   align-items: center;

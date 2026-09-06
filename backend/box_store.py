@@ -52,6 +52,18 @@ def _lnk_target(lnk: Path) -> str | None:
         return None
 
 
+def _url_target(url_file: Path) -> str | None:
+    """读取 .url 快捷方式的 URL（INI 格式：[InternetShortcut] URL=...）。"""
+    try:
+        for line in url_file.read_text(encoding="utf-8", errors="ignore").splitlines():
+            if line.lower().startswith("url="):
+                value = line[4:].strip()
+                return value or None
+    except Exception:
+        return None
+    return None
+
+
 def ensure_icon(item: dict[str, Any]) -> str | None:
     """提取 exe/lnk 关联图标为 PNG，返回路径；失败返回 None（前端回退占位图）。"""
     import subprocess
@@ -146,10 +158,12 @@ def add_item(path: str, name: str = "") -> dict[str, Any]:
         }
         items.append(entry)
         ensure_icon(entry)
-        # "吃掉"语义：桌面快捷方式入库后从桌面移除（导出可再还原）。
+        # "吃掉"语义：桌面快捷方式（.lnk/.url）入库后从桌面移除，导出时可按原目标还原。
+        # 普通文件/exe 只按引用收纳，不移动不删除（exe 拖离同目录会缺 DLL，文档类交还用户管理）。
         desktop = _desktop_dir()
-        if target.suffix.lower() == ".lnk" and desktop and target.parent == desktop:
-            entry["original_target"] = _lnk_target(target) or str(target)
+        suffix = target.suffix.lower()
+        if suffix in (".lnk", ".url") and desktop and target.parent == desktop:
+            entry["original_target"] = (_lnk_target(target) if suffix == ".lnk" else _url_target(target)) or str(target)
             try:
                 target.unlink(missing_ok=True)
                 entry["consumed"] = True
@@ -187,13 +201,24 @@ def export_shortcut(item_id: str) -> dict[str, Any]:
     if not item:
         raise ValueError("收纳箱中找不到该条目")
     target = Path(str(item.get("path", "")))
-    if not target.exists():
-        restored = str(item.get("original_target") or "")
-        if not restored or not Path(restored).exists():
-            raise ValueError("原始文件已不存在")
-        target = Path(restored)
+    original = str(item.get("original_target") or "")
     desktop = _desktop_dir() or Path.home() / "Desktop"
-    lnk = desktop / (Path(str(item.get("name") or target.name)).stem + ".lnk")
+    name = Path(str(item.get("name") or target.name)).stem
+    # .url 快捷方式还原：优先读存量 .url 文件里的 URL；已吃掉的用记录的原始目标。
+    url: str | None = None
+    if target.exists() and target.suffix.lower() == ".url":
+        url = _url_target(target)
+    elif original.lower().startswith(("http://", "https://")):
+        url = original
+    if url:
+        restored = desktop / (name + ".url")
+        restored.write_text("[InternetShortcut]\nURL=" + url + "\n", encoding="utf-8")
+        return {"shortcut": str(restored)}
+    if not target.exists():
+        if not original or not Path(original).exists():
+            raise ValueError("原始文件已不存在")
+        target = Path(original)
+    lnk = desktop / (name + ".lnk")
     script = (
         "$s=(New-Object -ComObject WScript.Shell).CreateShortcut('" + str(lnk) + "'); "
         "$s.TargetPath='" + str(target) + "'; "

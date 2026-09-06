@@ -232,3 +232,11 @@ interface ModelProfile {
 - `POST /api/box/export` ← `{ id }` → `{ shortcut }`：在桌面生成 `.lnk` 快捷方式（PowerShell WScript.Shell COM）。
 - `POST /api/box` 在已接入 API 时先启发式分类、再请模型复核分类（6s 超时，失败回退启发式）；响应始终为 `{ item: 单条目 }`。
 - 拖喂命中判定使用 CSS 像素（拖放坐标按 devicePixelRatio 换算），投放到收纳箱面板内同样接收入库；拖入悬停时日和给出惊讶反馈。
+
+## C8 补充 2：右键长按开箱与头部锚定气泡（2026-09-06）
+- 收纳箱打开方式改为**右键长按 650ms**；原"左键长按 650ms"逻辑删除。右键短按（<650ms）行为不变：收纳箱开着时关闭收纳箱，否则切换 API 面板。
+- 右键长按触发后必须吞掉随后的 `contextmenu`（`rightLongPressFired` 标志），防止长按开箱后又弹出 API 面板；右键按下后移动 >7px 视为取消。
+- 消息气泡只允许出现在日和头部左侧或右侧：水平位置锚定模型**不透明区域顶部带（包围盒顶部 32%）**的左右边缘（`headAnchor()`），垂直中心对准头部带中心，箭头指向头部；删除原 top/bottom 回退分支。
+- 已修复 bug：侧边扩展窗口向左扩展（side='left'）时，气泡原实现固定写在 `baseWidth/dpr+8`，会直接压在人物身上；现按扩展列方向锚定头部边缘。
+- 拖喂：`enter/over` 时日和眼睛跟随光标（`pet.focus`）+ 张嘴（surprised 姿态，150ms 节流）+ 光标处反馈标记（700ms 节流）；`drop` 支持一次吃掉多个文件（`Promise.allSettled` 逐个入库），成功后"张嘴接住(650ms)→开心咀嚼→播报"。
+- "吃掉"语义扩展到桌面 `.url` 快捷方式：`original_target` 记录 URL，导出时以 `[InternetShortcut]` INI 还原 `.url`；`.exe`/普通文件仍只按引用收纳，不移动不删除（避免拖离同目录缺 DLL）。
