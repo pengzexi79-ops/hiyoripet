@@ -130,12 +130,17 @@ let headPatCount = 0
 let headPatAt = 0
 
 /** 命中区域同步含 WebGL 回读与 GDI 区域提交，统一去抖，避免缩放/连点时每帧执行。 */
-function scheduleNativeHitRegion(delay = 180) {
+function scheduleNativeHitRegion(delay = 140) {
   if (hitRegionTimer !== undefined) clearTimeout(hitRegionTimer)
   hitRegionTimer = window.setTimeout(() => {
     hitRegionTimer = undefined
     void syncNativeHitRegion()
   }, delay)
+}
+
+/** 姿态动画会让轮廓连续变化：在姿态时程内多次补同步区域，避免摆出的手脚被旧区域裁掉。 */
+function scheduleRegionBurst() {
+  for (const delay of [120, 420, 900, 1500]) scheduleNativeHitRegion(delay)
 }
 
 async function syncNativeHitRegion() {
@@ -169,8 +174,9 @@ async function syncNativeHitRegion() {
     height: Math.max(1, Math.ceil(rect.height * dpr)),
   }))
   let finalPayload = payload
-  if (finalPayload.length > 64) {
-    // 条带过多时按行合并，降低 GDI 区域复杂度，避免提交失败。
+  if (finalPayload.length > 900) {
+    // 病态兜底：矩形异常多时按行合并。阈值必须远大于常规轮廓分段数，
+    // 否则会把双腿间隙、手臂与身体间的空隙也吞进命中范围（点空隙等于点宠物）。
     const rows = new Map<number, { x: number; y: number; right: number; bottom: number }>()
     for (const rect of finalPayload) {
       const rowKey = Math.floor(rect.y / (10 * dpr))
@@ -200,7 +206,7 @@ async function setFullWindowRegion() {
   const dpr = Math.max(1, window.devicePixelRatio || 1)
   const payload = [{ x: 0, y: 0, width: Math.ceil(window.innerWidth * dpr), height: Math.ceil(window.innerHeight * dpr) }]
   let finalPayload = payload
-  if (finalPayload.length > 64) {
+  if (finalPayload.length > 900) {
     // 条带过多时按行合并，降低 GDI 区域复杂度，避免提交失败。
     const rows = new Map<number, { x: number; y: number; right: number; bottom: number }>()
     for (const rect of finalPayload) {
@@ -267,6 +273,12 @@ onMounted(async () => {
   }
   pet = new Live2d()
   pet.initApp(canvas.value)
+  // 所有姿态入口统一触发区域补同步：摆臂/迈腿/跳跃的轮廓变化不再被旧区域裁剪。
+  const rawApplyPose = pet.applyPose.bind(pet)
+  pet.applyPose = (pose: PetPose, durationMs?: number) => {
+    rawApplyPose(pose, durationMs)
+    scheduleRegionBurst()
+  }
   await new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))
   await loadModel()
   await normalizePetWindowSize()
@@ -797,24 +809,23 @@ async function saveModelSettings() {
 }
 function positionApiPanel() {
   if (!apiPanelVisible.value) return
-  const b = pet?.getBounds() ?? { x: window.innerWidth / 2, y: window.innerHeight / 2, width: 0, height: 0 }
+  const head = headAnchor() ?? { left: 0, right: window.innerWidth, cy: window.innerHeight / 2 }
   const width = apiPanel.value?.offsetWidth || Math.min(286 * uiScale.value, window.innerWidth - 16)
   const height = apiPanel.value?.offsetHeight || Math.min(430 * uiScale.value, window.innerHeight - 16)
-  if (bubbleWindowLayout) {
-    const dpr = Math.max(1, window.devicePixelRatio || 1)
-    apiPanelPos.value = {
-      x: Math.max(8, Math.min(bubbleWindowLayout.baseWidth / dpr + 8, window.innerWidth - width - 8)),
-      y: Math.max(8, Math.min(b.y + b.height * 0.08, window.innerHeight - height - 8)),
-    }
-    return
+  const gap = 8
+  const edge = 8
+  // 设置面板与气泡同规则：贴头部左右放置，只在空间不够时换边，不允许压到人物。
+  const rightSpace = window.innerWidth - edge - (head.right + gap)
+  const leftSpace = head.left - gap - edge
+  let side: 'left' | 'right' = bubbleWindowLayout ? bubbleWindowLayout.side : (rightSpace >= leftSpace ? 'right' : 'left')
+  let x = side === 'right' ? head.right + gap : head.left - gap - width
+  if (!bubbleWindowLayout && (side === 'right' ? rightSpace : leftSpace) < Math.min(160 * uiScale.value, width)) {
+    side = side === 'right' ? 'left' : 'right'
+    x = side === 'right' ? head.right + gap : head.left - gap - width
   }
-  const gap = 10
-  const right = window.innerWidth - (b.x + b.width)
-  const rawX = right >= width + gap ? b.x + b.width + gap : b.x - width - gap
-  apiPanelPos.value = {
-    x: Math.max(8, Math.min(rawX, window.innerWidth - width - 8)),
-    y: Math.max(8, Math.min(b.y + b.height * 0.08, window.innerHeight - height - 8)),
-  }
+  x = Math.max(edge, Math.min(x, window.innerWidth - width - edge))
+  const y = Math.max(edge, Math.min(head.cy - height * 0.32, window.innerHeight - height - edge))
+  apiPanelPos.value = { x, y }
 }
 
 async function openApiPanel() {
@@ -1146,7 +1157,8 @@ async function expandBubbleWindowNow() {
   ])
   if (!position || !size) return
   const dpr = Math.max(1, window.devicePixelRatio || 1)
-  const extraWidth = Math.ceil((236 * uiScale.value + 28) * dpr)
+  // 扩展列 = 气泡最大宽度 + 两侧 8px 余量：气泡贴头时不会被列宽撑远。
+  const extraWidth = Math.ceil((236 * uiScale.value + 16) * dpr)
   const canExpandRight = !monitor || position.x + size.width + extraWidth <= monitor.workArea.position.x + monitor.workArea.size.width
   const canExpandLeft = !monitor || position.x - extraWidth >= monitor.workArea.position.x
   const layout: BubbleWindowLayout = {
@@ -1256,7 +1268,7 @@ function positionBubble() {
   const maxWidth = Math.min(236 * uiScale.value, Math.max(120, window.innerWidth - 16))
   const measured = bubble.value?.getBoundingClientRect()
   const height = measured?.height || Math.min(220 * uiScale.value, window.innerHeight - 16)
-  const gap = 10
+  const gap = 8
   const edge = 8
   const rightSpace = window.innerWidth - edge - (head.right + gap)
   const leftSpace = head.left - gap - edge

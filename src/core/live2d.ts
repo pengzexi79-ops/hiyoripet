@@ -52,14 +52,11 @@ export class Live2d {
   private swayY = 0
   private swayVY = 0
   private swayLastAt = 0
-  // 不透明区域提取是 WebGL 回读，代价高；短 TTL 缓存避免每次点击/缩放都回读。
-  private regionCache: Array<{ x: number; y: number; width: number; height: number }> | null = null
-  private regionCacheAt = 0
-  private regionCacheZoom = 1
-  // 回读完整性基线：部分驱动在高倍缩放下返回损坏像素（稀碎矩形会把人物裁成碎片），
-  // 新回读结果与上次可信结果面积偏差超阈值时退回兜底轮廓，坏数据不进 GDI。
-  private lastGoodRegionArea = 0
-  private lastGoodRegionZoom = 1
+  // 已验证的不透明区域（回读通过完整性校验才会写入）。缩放不做回读，一律按
+  // contain 等比缩放换算；回读损坏（部分驱动会返回局部条带）不允许污染它。
+  private goodRects: Array<{ x: number; y: number; width: number; height: number }> | null = null
+  private goodZoom = 1
+  private lastReadAt = 0
   private paramHook: { off: (event: string, listener: () => void) => void } | null = null
   private paramListener: (() => void) | null = null
 
@@ -86,10 +83,8 @@ export class Live2d {
     const height = Math.max(1, Math.round(this.view.clientHeight || window.innerHeight))
     if (this.app.screen.width !== width || this.app.screen.height !== height) {
       this.app.renderer.resize(width, height)
-      // 区域坐标属于当前 canvas；窗口尺寸变化后，旧缓存不能继续按旧中心缩放。
-      this.regionCache = null
-      this.regionCacheAt = 0
-      this.regionCacheZoom = this.zoomLevel
+      // 缩放等比改变画布尺寸：goodRects 按倍率换算仍然精确，不需要作废回读。
+      this.lastReadAt = 0
     }
   }
 
@@ -170,26 +165,63 @@ export class Live2d {
    */
   getOpaqueRegions(padding = 3, force = false): Array<{ x: number; y: number; width: number; height: number }> {
     if (!this.model || !this.app) return []
-    if (this.regionCache && Math.abs(this.zoomLevel - this.regionCacheZoom) > 0.0001) {
-      // 缩放围绕 canvas 中心进行；缓存保留在首次回读的坐标系，避免多次缩放累积漂移。
-      const k = this.zoomLevel / this.regionCacheZoom
-      const cx = this.app.screen.width / 2
-      const cy = this.app.screen.height / 2
-      return this.regionCache.map((rect) => ({
-        x: cx + (rect.x - cx) * k,
-        y: cy + (rect.y - cy) * k,
+    // contain 居中模型随窗口等比缩放（360x600 → 792x1320 时模型中心正好 ×k），
+    // 从原点缩放即精确；不能围绕"当前画布中心"换算——goodRects 坐标属于旧画布
+    // 坐标系，窗口尺寸变化后中心换算会把区域算到窗口外（宠物整体消失）。
+    const scaleGood = () => {
+      const k = this.zoomLevel / this.goodZoom
+      return this.goodRects!.map((rect) => ({
+        x: rect.x * k,
+        y: rect.y * k,
         width: rect.width * k,
         height: rect.height * k,
       }))
     }
-    if (!force && this.regionCache && performance.now() - this.regionCacheAt < 400) return this.regionCache
-    const rects = this.computeOpaqueSegments(padding)
-    if (rects.length) {
-      this.regionCache = rects
-      this.regionCacheAt = performance.now()
-      this.regionCacheZoom = this.zoomLevel
+    if (this.goodRects && Math.abs(this.zoomLevel - this.goodZoom) > 0.0001) {
+      return scaleGood()
     }
-    return rects.length ? rects : (this.regionCache ?? [])
+    if (!force && this.goodRects && performance.now() - this.lastReadAt < 400) {
+      return this.goodRects
+    }
+    // 回读有 TTL 且只在 zoom === goodZoom 时进行：部分驱动在异尺寸/高倍下
+    // 会返回损坏像素（局部条带、空帧）。未通过校验的结果不写回 goodRects，
+    // 退化为整个包围盒区域——宁可暂时让空白处吃掉点击，也绝不让 SetWindowRgn
+    // 把人物裁成碎片（可见性优先）。
+    const rects = this.computeOpaqueSegments(padding)
+    if (this.validateRegions(rects)) {
+      this.goodRects = rects
+      this.goodZoom = this.zoomLevel
+      this.lastReadAt = performance.now()
+      return rects
+    }
+    this.lastReadAt = performance.now()
+    if (this.goodRects) return scaleGood()
+    const bounds = this.model.getBounds()
+    return [{ x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height }]
+  }
+
+  /** 回读完整性校验：站姿人物对包围盒覆盖率不可能低于 4%，不透明并集的
+   * 高/宽不可能小于包围盒一半（"只返回腿部条带"类局部损坏在此拦截）。 */
+  private validateRegions(rects: Array<{ x: number; y: number; width: number; height: number }>): boolean {
+    if (!rects.length || !this.app) return false
+    const bounds = this.model?.getBounds()
+    if (!bounds || !bounds.width || !bounds.height) return false
+    let opaqueArea = 0
+    let top = Infinity
+    let bottom = -Infinity
+    let left = Infinity
+    let right = -Infinity
+    for (const rect of rects) {
+      opaqueArea += rect.width * rect.height
+      top = Math.min(top, rect.y)
+      bottom = Math.max(bottom, rect.y + rect.height)
+      left = Math.min(left, rect.x)
+      right = Math.max(right, rect.x + rect.width)
+    }
+    const boundsArea = Math.max(1, bounds.width * bounds.height)
+    if (opaqueArea < boundsArea * 0.04) return false
+    if (bottom - top < bounds.height * 0.5 || right - left < bounds.width * 0.5) return false
+    return true
   }
 
   private computeOpaqueSegments(padding = 3): Array<{ x: number; y: number; width: number; height: number }> {
@@ -249,22 +281,24 @@ export class Live2d {
           }
         }
       }
-      // 回读完整性校验：站姿人物对包围盒覆盖率不可能低于 4%。
+      // 回读完整性校验：站姿人物对包围盒覆盖率不可能低于 4%，且不透明
+      // 并集的高/宽不可能小于包围盒一半（"只返回腿部条带"类局部损坏在此拦截）。
       if (regions.length) {
         let opaqueArea = 0
-        for (const rect of regions) opaqueArea += rect.width * rect.height
+        let top = Infinity
+        let bottom = -Infinity
+        let left = Infinity
+        let right = -Infinity
+        for (const rect of regions) {
+          opaqueArea += rect.width * rect.height
+          top = Math.min(top, rect.y)
+          bottom = Math.max(bottom, rect.y + rect.height)
+          left = Math.min(left, rect.x)
+          right = Math.max(right, rect.x + rect.width)
+        }
         const boundsArea = Math.max(1, bounds.width * bounds.height)
         if (opaqueArea < boundsArea * 0.04) return fallback()
-        // 与上次可信区域比较（按缩放比换算）：姿态/动作只会小幅改变覆盖率，
-        // 大幅偏离说明回读损坏，宁可用兜底轮廓也不把碎片区域交给 SetWindowRgn。
-        if (this.lastGoodRegionArea > 0) {
-          const expected = this.lastGoodRegionArea * Math.pow(this.zoomLevel / this.lastGoodRegionZoom, 2)
-          if (expected > 0 && (opaqueArea < expected * 0.45 || opaqueArea > expected * 2.2)) {
-            return fallback()
-          }
-        }
-        this.lastGoodRegionArea = opaqueArea
-        this.lastGoodRegionZoom = this.zoomLevel
+        if (bottom - top < bounds.height * 0.5 || right - left < bounds.width * 0.5) return fallback()
       }
       return regions.length ? regions.slice(0, 240) : fallback()
     } catch {
@@ -296,16 +330,16 @@ export class Live2d {
   /** 延长当前姿态时限但不重置步态相位（行走循环持续驱动用）。 */
   extendPose(durationMs: number): void {
     if (!this.model || this.activePose === 'idle') return
-    // 行走/姿态持续改变轮廓；节流地失效区域缓存，避免命中的不透明区域长期滞后。
+    // 行走/姿态持续改变轮廓：节流地要求重新回读（goodRects 仍继续兜底使用）。
     const now = performance.now()
-    if (now - this.regionCacheAt > 300) this.regionCacheAt = 0
+    if (now - this.lastReadAt > 300) this.lastReadAt = 0
     if (this.poseTimer) clearTimeout(this.poseTimer)
     this.poseTimer = window.setTimeout(() => {
       this.poseTargets = {}
       this.activePose = 'idle'
       this.poseStartedAt = performance.now()
       this.poseTimer = undefined
-      this.regionCacheAt = 0
+      this.lastReadAt = 0
     }, Math.max(800, durationMs))
   }
 
@@ -390,8 +424,9 @@ export class Live2d {
   applyPose(pose: PetPose, durationMs = 3600): void {
     if (!this.model) return
     this.ensureParamHook()
-    // 姿态会持续改变模型轮廓（摆臂/迈腿/跳跃），旧的区域缓存会裁掉新手脚。
-    this.regionCacheAt = 0
+    // 姿态会持续改变模型轮廓（摆臂/迈腿/跳跃）：要求重新回读刷新区域；
+    // 回读失败时继续沿用 goodRects，不允许坏数据顶掉可信区域。
+    this.lastReadAt = 0
     if (this.poseTimer) clearTimeout(this.poseTimer)
     this.activePose = pose
     this.poseStartedAt = performance.now()
@@ -438,7 +473,7 @@ export class Live2d {
       this.activePose = 'idle'
       this.poseStartedAt = performance.now()
       this.poseTimer = undefined
-      this.regionCacheAt = 0
+      this.lastReadAt = 0
     }, Math.max(800, durationMs))
   }
 
@@ -603,6 +638,9 @@ export class Live2d {
     }
     this.baseScale = 0
     this.zoomLevel = 1
+    this.goodRects = null
+    this.goodZoom = 1
+    this.lastReadAt = 0
   }
 
   destroy(): void {

@@ -240,3 +240,9 @@ interface ModelProfile {
 - 已修复 bug：侧边扩展窗口向左扩展（side='left'）时，气泡原实现固定写在 `baseWidth/dpr+8`，会直接压在人物身上；现按扩展列方向锚定头部边缘。
 - 拖喂：`enter/over` 时日和眼睛跟随光标（`pet.focus`）+ 张嘴（surprised 姿态，150ms 节流）+ 光标处反馈标记（700ms 节流）；`drop` 支持一次吃掉多个文件（`Promise.allSettled` 逐个入库），成功后"张嘴接住(650ms)→开心咀嚼→播报"。
 - "吃掉"语义扩展到桌面 `.url` 快捷方式：`original_target` 记录 URL，导出时以 `[InternetShortcut]` INI 还原 `.url`；`.exe`/普通文件仍只按引用收纳，不移动不删除（避免拖离同目录缺 DLL）。
+
+## C9 命中区域保真与 DPI 一致性（2026-09-07）
+- 窗口 `additionalBrowserArgs` 追加 `--force-device-scale-factor=1`：强制 WebView2 CSS 像素 = 物理像素（本机系统自定义缩放 137% 曾导致 dpr=1.3725 与窗口 1.0 缩放错位，衍生条带断层/手脚被裁/气泡距离错误）。
+- 命中区域行合并阈值 64 → 900：常规轮廓分段不再合并成横条，双腿间隙/手臂与身体之间的空隙穿透到桌面；900 仅作病态兜底。
+- 姿态变化（applyPose/extendPose/姿态结束）会使不透明区域缓存失效，并在 120/420/900/1500ms 补同步原生区域，避免摆出的手脚被旧区域裁掉。
+- 气泡与 API 面板统一头部锚定：水平贴头部不透明边缘 gap=8px，垂直对准头部带中心；扩展列宽度 = 气泡宽 + 16px。
